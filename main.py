@@ -8,6 +8,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 import config
 import services.state as state_svc
+from utils import log_scrubber
 from agents.router import classify
 from bot.handlers import gym as gym_handler
 from bot.handlers import meal as meal_handler
@@ -19,6 +20,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=logging.INFO,
 )
+log_scrubber.install()  # must run after basicConfig so handlers exist
 logger = logging.getLogger(__name__)
 
 _GENERAL_SYSTEM = (
