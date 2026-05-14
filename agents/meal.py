@@ -111,12 +111,12 @@ async def handle(conn: sqlite3.Connection, text: str, user_id: int = 0) -> str:
     try:
         intent = json.loads(_extract_json(raw))
     except (json.JSONDecodeError, ValueError):
-        return "Log food, check today's totals, or ask for a meal suggestion?"
+        return "What do you need — logging food, today's numbers, or a meal idea?"
 
     action = intent.get("action")
 
     if action == "log":
-        return await _log_food(conn, text)
+        return await _log_food(conn, text, user_id)
     if action == "summary":
         return _daily_summary(conn)
     if action == "remaining":
@@ -125,8 +125,8 @@ async def handle(conn: sqlite3.Connection, text: str, user_id: int = 0) -> str:
         meal = intent.get("meal", "")
         return _suggest_meal(meal)
     if action == "clarify":
-        return intent.get("question", "Log food, check today's totals, or ask for a meal suggestion?")
-    return "Log food, check today's totals, or ask for a meal suggestion?"
+        return intent.get("question", "What do you need — logging food, today's numbers, or a meal idea?")
+    return "What do you need — logging food, today's numbers, or a meal idea?"
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
@@ -176,14 +176,10 @@ async def _log_food(conn: sqlite3.Connection, text: str) -> str:
     kcal_remaining = cal_target - totals["kcal"]
 
     lines = [f"Logged ({meal_slot}):", *log_lines, ""]
-    lines.append(
-        f"Today so far: {totals['protein_g']:.0f}g protein / {totals['kcal']:.0f} kcal"
-    )
-    lines.append(
-        f"Remaining:    {max(protein_remaining, 0):.0f}g protein / {max(kcal_remaining, 0):.0f} kcal"
-    )
-    if protein_remaining > 0:
-        lines.append(f"Pre-bed shake ({protein_remaining:.0f}g to go — 2 scoops = ~48g).")
+    lines.append(f"Running total: {totals['protein_g']:.0f}g protein / {totals['kcal']:.0f} kcal")
+    lines.append(f"Still to hit:  {max(protein_remaining, 0):.0f}g protein / {max(kcal_remaining, 0):.0f} kcal")
+    if protein_remaining > 40:
+        lines.append(f"Pre-bed shake will cover ~48g of that {protein_remaining:.0f}g gap.")
 
     return "\n".join(lines)
 
@@ -199,18 +195,19 @@ def _daily_summary(conn: sqlite3.Connection) -> str:
     kcal_gap = cal_target - totals["kcal"]
     entries = len(logs)
 
+    protein_status = f"{totals['protein_g']:.0f}g / {PROTEIN_TARGET_G}g" + (f" ({protein_gap:.0f}g short)" if protein_gap > 0 else " ✓")
+    kcal_status = f"{totals['kcal']:.0f} / {cal_target} kcal" + (f" ({kcal_gap:.0f} to go)" if kcal_gap > 0 else " ✓")
+
     lines = [
-        f"Today ({today}) — {entries} entr{'y' if entries == 1 else 'ies'} logged",
-        f"  Protein: {totals['protein_g']:.0f}g / {PROTEIN_TARGET_G}g"
-        + (f"  ({protein_gap:.0f}g remaining)" if protein_gap > 0 else "  ✓"),
-        f"  Calories: {totals['kcal']:.0f} / {cal_target} kcal"
-        + (f"  ({kcal_gap:.0f} remaining)" if kcal_gap > 0 else "  ✓"),
+        f"Today ({today}), {entries} item{'s' if entries != 1 else ''} logged:",
+        f"  Protein:  {protein_status}",
+        f"  Calories: {kcal_status}",
     ]
 
     if not logs:
         lines.append("Nothing logged yet.")
     if protein_gap > 40:
-        lines.append(f"Protein short — pre-bed shake will cover ~48g.")
+        lines.append(f"Pre-bed shake (~48g) will close most of that protein gap.")
 
     return "\n".join(lines)
 
@@ -225,13 +222,17 @@ def _remaining_macros(conn: sqlite3.Connection) -> str:
     kcal_left = max(cal_target - totals["kcal"], 0)
 
     if protein_left == 0 and kcal_left == 0:
-        return "You've hit both targets for today."
+        return f"Ollie, you've hit both targets today. Job done."
 
-    lines = [f"Remaining today (target: {cal_target} kcal / {PROTEIN_TARGET_G}g protein):"]
-    lines.append(f"  Protein: {protein_left:.0f}g left")
-    lines.append(f"  Calories: {kcal_left:.0f} kcal left")
+    lines = [f"Still to hit today (target: {PROTEIN_TARGET_G}g protein / {cal_target} kcal):"]
+    lines.append(f"  Protein:  {protein_left:.0f}g")
+    lines.append(f"  Calories: {kcal_left:.0f} kcal")
     if protein_left > 0:
-        lines.append(f"  Pre-bed shake covers ~48g — {max(protein_left - 48, 0):.0f}g gap after that.")
+        gap_after_shake = max(protein_left - 48, 0)
+        if gap_after_shake == 0:
+            lines.append("Pre-bed shake (~48g) will get you there.")
+        else:
+            lines.append(f"Pre-bed shake covers ~48g — still {gap_after_shake:.0f}g short after that.")
 
     return "\n".join(lines)
 

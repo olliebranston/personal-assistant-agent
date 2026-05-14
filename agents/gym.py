@@ -153,10 +153,7 @@ async def handle(conn: sqlite3.Connection, text: str, user_id: int = 0) -> str:
     try:
         intent = json.loads(_extract_json(raw))
     except (json.JSONDecodeError, ValueError):
-        return (
-            "Didn't catch that — are you logging a workout, "
-            "asking for a suggestion, or checking exercise history?"
-        )
+        return "What do you need — a session plan, logging your lifts, or checking history?"
 
     action = intent.get("action")
 
@@ -168,11 +165,8 @@ async def handle(conn: sqlite3.Connection, text: str, user_id: int = 0) -> str:
         exercise = intent.get("exercise", "").strip()
         return await _query_history(conn, exercise)
     if action == "clarify":
-        return intent.get(
-            "question",
-            "Log a session, get a workout suggestion, or check history?",
-        )
-    return "Log a session, get a workout suggestion, or check history?"
+        return intent.get("question", "What do you need — a session plan, logging your lifts, or checking history?")
+    return "What do you need — a session plan, logging your lifts, or checking history?"
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
@@ -195,7 +189,7 @@ def _get_next_session_type(conn: sqlite3.Connection) -> str:
 async def _suggest_next_session(conn: sqlite3.Connection) -> str:
     """Return the formatted exercise plan for the next PPL session."""
     session_type = _get_next_session_type(conn)
-    return f"Next up: {session_type.upper()}\n\n{_SESSION_PLANS[session_type]}"
+    return f"{session_type.title()} day. Here's the plan:\n\n{_SESSION_PLANS[session_type]}"
 
 
 async def _log_workout(conn: sqlite3.Connection, text: str) -> str:
@@ -217,7 +211,7 @@ async def _log_workout(conn: sqlite3.Connection, text: str) -> str:
     today = date.today().isoformat()
     session_id = insert_session(conn, GymSession(date=today, session_type=session_type))
 
-    lines = [f"Logged — {session_type.upper()} ({today})\n"]
+    lines = [f"Done — {session_type} logged ({today}):\n"]
     for ex in exercises:
         weight = ex.get("weight_kg")
         warmup = ex.get("warmup_kg")
@@ -254,11 +248,11 @@ async def _query_history(conn: sqlite3.Connection, exercise: str) -> str:
     if not rows:
         return f"No logged sets for '{exercise}' yet."
 
-    lines = [f"{exercise.title()} — last {len(rows)} logged set(s):"]
+    lines = [f"{exercise.title()} — last {len(rows)} session(s):"]
     for r in rows:
         weight_str = f"{r['weight_kg']}kg" if r["weight_kg"] is not None else "BW"
-        warmup_str = f" (s{r['warmup_kg']}kg)" if r.get("warmup_kg") else ""
-        note_str = f"  [{r['notes']}]" if r.get("notes") else ""
+        warmup_str = f" (warmup {r['warmup_kg']}kg)" if r.get("warmup_kg") else ""
+        note_str = f"  {r['notes']}" if r.get("notes") else ""
         lines.append(
             f"  {r['date']}  {weight_str}{warmup_str}  {r['sets']}×{r['reps']}{note_str}"
         )
