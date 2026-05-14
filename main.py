@@ -7,6 +7,7 @@ from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 import config
+import services.state as state_svc
 from agents.router import classify
 from bot.handlers import gym as gym_handler
 from bot.handlers import meal as meal_handler
@@ -67,6 +68,16 @@ async def route_message(update: Update, context) -> None:
         return
 
     await update.effective_chat.send_action(ChatAction.TYPING)
+
+    # If there's a pending confirmation, bypass the domain classifier and route directly.
+    pending = state_svc.get(user_id)
+    if pending:
+        if pending.get("type") == "food_log":
+            await meal_handler.handle(update, context)
+            return
+        if pending.get("type") == "session_offered":
+            await gym_handler.handle(update, context)
+            return
 
     domain = await classify(text)
     logger.info("Routed '%s' → %s", text[:60], domain)

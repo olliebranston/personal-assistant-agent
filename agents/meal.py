@@ -7,6 +7,7 @@ import re
 import sqlite3
 from datetime import date, timedelta
 
+import services.state as state_svc
 from services.nutrition import lookup_macros
 from services.openrouter import complete
 from storage.models import (
@@ -22,20 +23,19 @@ from storage.models import (
 
 PROTEIN_TARGET_G = 230
 CALORIE_TARGETS = {
-    "weights":  3300,   # gym session day — upper end of 3,200–3,400 range
-    "rest":     2950,   # rest day — middle of 2,900–3,000 range
-    "default":  3150,   # TDEE recomp target when day type unknown
+    "weights":  3300,
+    "rest":     2950,
+    "default":  3150,
 }
 
 # ── Meal rotations (from Mealplan-CONTEXT.md) ─────────────────────────────────
 
-# Keyed by weekday number: Monday=0, Sunday=6
 _BREAKFAST_ROTATION = {
     0: "Protein smoothie — 2 scoops whey + frozen berries + 2 tbsp peanut butter + oat milk (~50g protein). 3 mins.",
     1: "4-egg omelette — mushrooms, peppers, spinach, chilli flakes (~28g protein). Add 150g Greek yoghurt on the side for +15g.",
-    2: "Protein smoothie — same as Monday. Pre-portion bags help (prep Sunday). (~50g protein)",
+    2: "Protein smoothie — same as Monday (~50g protein). Pre-portion bags help.",
     3: "Protein overnight oats — 80g oats + 1 scoop protein + 150g Greek yoghurt + frozen berries. Prep tonight. (~42g protein)",
-    4: "4 scrambled eggs on wholegrain sourdough + hot sauce (~30g protein). Add Greek yoghurt side if needed.",
+    4: "4 scrambled eggs on wholegrain sourdough + hot sauce (~30g protein). Greek yoghurt side if needed.",
     5: "Weekend — rotate: eggs Benedict with smoked salmon (~35–40g) / protein pancakes + Greek yoghurt (~35g) / full scramble + avocado (~30g)",
     6: "Weekend — rotate: shakshuka 4 eggs + feta + tofu (~30–38g) / eggs Benedict (~35–40g) / full scramble (~30g)",
 }
@@ -51,7 +51,7 @@ _LUNCH_ROTATIONS = [
 _WEEKDAY_DINNERS = [
     "Tofu stir fry (soy-ginger-sesame) + rice/noodles — 35–45g protein. Full 400g block firm tofu + edamame.",
     "Tofu pad thai — tamarind + lime + peanuts — 35–45g protein.",
-    "Miso-glazed tofu + roasted sweet potato — 30–35g protein. Easy miso-mirin glaze.",
+    "Miso-glazed tofu + roasted sweet potato — 30–35g protein.",
     "Sweet potato & black bean chilli — 30–35g protein. Serve with Greek yoghurt + hot sauce.",
     "Tofu ramen (miso-mushroom broth) — 35–40g protein. Dried shiitake + soft-boiled egg.",
     "Chickpea & spinach curry — 25–30g protein. Add tempeh to push higher.",
@@ -101,11 +101,26 @@ Rules:
 - For alcohol, use the drink name directly (e.g. "pint of lager", "glass of red wine").
 """
 
+_AFFIRMATIVES = frozenset({
+    "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "correct", "right",
+    "looks good", "go ahead", "log it", "perfect", "good", "fine", "that's right",
+    "sounds right", "spot on", "exactly",
+})
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 
 async def handle(conn: sqlite3.Connection, text: str, user_id: int = 0) -> str:
-    """Classify the meal message and dispatch to the appropriate function."""
+    """Classify the meal message and dispatch to the appropriate function.
+
+    Checks for a pending food-log confirmation first — if one exists, the
+    incoming message is treated as a response to it regardless of routing.
+    """
+    # Pending food-log confirmation takes priority over normal routing.
+    pending = state_svc.get(user_id)
+    if pending and pending.get("type") == "food_log":
+        return await _handle_food_confirmation(conn, text, user_id, pending)
+
     raw = await complete([{"role": "user", "content": text}], system=_ROUTER_SYSTEM)
 
     try:
@@ -132,12 +147,12 @@ async def handle(conn: sqlite3.Connection, text: str, user_id: int = 0) -> str:
 # ── Private helpers ───────────────────────────────────────────────────────────
 
 
-async def _log_food(conn: sqlite3.Connection, text: str) -> str:
-    """Parse free-text food log, look up macros via USDA, insert rows, return summary.
+async def _log_food(conn: sqlite3.Connection, text: str, user_id: int) -> str:
+    """Parse free-text food log, look up USDA macros, stage a confirmation request.
 
-    Each food item gets its own FoodLog row so per-item history is queryable.
-    Macros are fetched from USDA (source='usda') or flagged as estimated if
-    the search returns nothing.
+    Does NOT write to the DB yet. Stores the parsed items in pending state and
+    returns a confirmation message showing quantities and macros. The actual
+    write happens in _handle_food_confirmation() after Ollie confirms.
     """
     raw = await complete([{"role": "user", "content": text}], system=_FOOD_PARSER_SYSTEM)
 
@@ -151,41 +166,96 @@ async def _log_food(conn: sqlite3.Connection, text: str) -> str:
         return "No food items found. Try: 'had 200g tofu stir fry and a bowl of rice'"
 
     meal_slot = parsed.get("meal_slot", "other")
-    today = date.today().isoformat()
 
-    log_lines = []
+    # Fetch USDA macros for each item before asking for confirmation.
+    enriched = []
     for item in items:
         macros = await lookup_macros(item["name"], item["quantity_g"])
-        insert_food_log(conn, FoodLog(
-            date=today,
-            meal_slot=meal_slot,
-            description=f"{item['quantity_g']}g {item['name']}",
-            protein_g=macros["protein_g"],
-            kcal=macros["kcal"],
-            source=macros["source"],
-        ))
-        flag = " [estimated — USDA no match]" if macros["source"] == "estimated" else ""
-        log_lines.append(
+        enriched.append({
+            "name": item["name"],
+            "quantity_g": item["quantity_g"],
+            "protein_g": macros["protein_g"],
+            "kcal": macros["kcal"],
+            "source": macros["source"],
+        })
+
+    state_svc.set_state(user_id, {
+        "type": "food_log",
+        "meal_slot": meal_slot,
+        "items": enriched,
+    })
+
+    lines = ["I'll log:"]
+    for item in enriched:
+        flag = " (estimated — no USDA match)" if item["source"] == "estimated" else ""
+        lines.append(
             f"  {item['quantity_g']}g {item['name']} — "
-            f"{macros['protein_g']}g protein, {macros['kcal']:.0f} kcal{flag}"
+            f"{item['protein_g']}g protein, {item['kcal']:.0f} kcal{flag}"
         )
-
-    totals = get_daily_totals(conn, today)
-    cal_target = _get_calorie_target(conn)
-    protein_remaining = PROTEIN_TARGET_G - totals["protein_g"]
-    kcal_remaining = cal_target - totals["kcal"]
-
-    lines = [f"Logged ({meal_slot}):", *log_lines, ""]
-    lines.append(f"Running total: {totals['protein_g']:.0f}g protein / {totals['kcal']:.0f} kcal")
-    lines.append(f"Still to hit:  {max(protein_remaining, 0):.0f}g protein / {max(kcal_remaining, 0):.0f} kcal")
-    if protein_remaining > 40:
-        lines.append(f"Pre-bed shake will cover ~48g of that {protein_remaining:.0f}g gap.")
-
+    lines.append("Look right? (yes to confirm, or tell me what to adjust)")
     return "\n".join(lines)
 
 
+async def _handle_food_confirmation(
+    conn: sqlite3.Connection,
+    text: str,
+    user_id: int,
+    pending: dict,
+) -> str:
+    """Handle Ollie's response to a staged food-log confirmation.
+
+    Affirmative → write everything to DB, return running total.
+    Cancellation → clear state, acknowledge.
+    Anything else → treat as an adjustment and re-parse as a new food log.
+    """
+    text_lower = text.lower().strip()
+
+    if any(w in text_lower for w in ("cancel", "forget", "never mind", "nevermind", "don't log", "dont log", "no thanks")):
+        state_svc.clear(user_id)
+        return "No problem, not logged."
+
+    words = set(text_lower.split())
+    is_yes = bool(words & _AFFIRMATIVES) and len(text.split()) <= 6
+
+    if is_yes:
+        today = date.today().isoformat()
+        meal_slot = pending["meal_slot"]
+        total_protein = 0.0
+        total_kcal = 0.0
+
+        for item in pending["items"]:
+            insert_food_log(conn, FoodLog(
+                date=today,
+                meal_slot=meal_slot,
+                description=f"{item['quantity_g']}g {item['name']}",
+                protein_g=item["protein_g"],
+                kcal=item["kcal"],
+                source=item["source"],
+            ))
+            total_protein += item["protein_g"]
+            total_kcal += item["kcal"]
+
+        state_svc.clear(user_id)
+
+        totals = get_daily_totals(conn, today)
+        cal_target = _get_calorie_target(conn)
+        protein_remaining = max(PROTEIN_TARGET_G - totals["protein_g"], 0)
+
+        lines = [f"Logged. {total_protein:.0f}g protein, {total_kcal:.0f} kcal."]
+        lines.append(f"Running today: {totals['protein_g']:.0f}g protein / {totals['kcal']:.0f} kcal (target: {cal_target})")
+        if protein_remaining > 40:
+            lines.append(f"Still {protein_remaining:.0f}g protein short — pre-bed shake will close most of it.")
+        elif protein_remaining > 0:
+            lines.append(f"Just {protein_remaining:.0f}g protein left for the day.")
+        return "\n".join(lines)
+
+    # Not clearly yes — treat as an adjustment and re-parse.
+    state_svc.clear(user_id)
+    return await _log_food(conn, text, user_id)
+
+
 def _daily_summary(conn: sqlite3.Connection) -> str:
-    """Return today's macro totals vs target, with a gap flag."""
+    """Return today's macro totals vs target."""
     today = date.today().isoformat()
     totals = get_daily_totals(conn, today)
     cal_target = _get_calorie_target(conn)
@@ -207,7 +277,7 @@ def _daily_summary(conn: sqlite3.Connection) -> str:
     if not logs:
         lines.append("Nothing logged yet.")
     if protein_gap > 40:
-        lines.append(f"Pre-bed shake (~48g) will close most of that protein gap.")
+        lines.append("Pre-bed shake (~48g) will close most of that protein gap.")
 
     return "\n".join(lines)
 
@@ -222,7 +292,7 @@ def _remaining_macros(conn: sqlite3.Connection) -> str:
     kcal_left = max(cal_target - totals["kcal"], 0)
 
     if protein_left == 0 and kcal_left == 0:
-        return f"Ollie, you've hit both targets today. Job done."
+        return "Ollie, you've hit both targets today. Job done."
 
     lines = [f"Still to hit today (target: {PROTEIN_TARGET_G}g protein / {cal_target} kcal):"]
     lines.append(f"  Protein:  {protein_left:.0f}g")
@@ -240,44 +310,34 @@ def _remaining_macros(conn: sqlite3.Connection) -> str:
 def _suggest_meal(meal: str) -> str:
     """Return a meal suggestion from the appropriate rotation."""
     today = date.today()
-    weekday = today.weekday()  # 0=Monday, 6=Sunday
+    weekday = today.weekday()
 
     if "breakfast" in meal:
-        return f"Breakfast suggestion:\n{_BREAKFAST_ROTATION[weekday]}"
+        return f"Breakfast today:\n{_BREAKFAST_ROTATION[weekday]}"
 
     if "lunch" in meal:
-        # Pick a rotation based on ISO week number so it advances weekly
         idx = today.isocalendar()[1] % len(_LUNCH_ROTATIONS)
-        return f"Lunch suggestion (batch cook):\n{_LUNCH_ROTATIONS[idx]}"
+        return f"Lunch (batch cook):\n{_LUNCH_ROTATIONS[idx]}"
 
     if "dinner" in meal:
-        if weekday >= 5:  # Sat or Sun
+        if weekday >= 5:
             import random
-            return f"Dinner suggestion (weekend):\n{random.choice(_WEEKEND_DINNERS)}"
+            return f"Dinner (weekend):\n{random.choice(_WEEKEND_DINNERS)}"
         idx = weekday % len(_WEEKDAY_DINNERS)
-        return f"Dinner suggestion:\n{_WEEKDAY_DINNERS[idx]}"
+        return f"Dinner:\n{_WEEKDAY_DINNERS[idx]}"
 
     if "snack" in meal:
         return (
-            "Snack options (target 15–20g protein):\n"
-            "  • Protein bar (check label: protein > sugar)\n"
-            "  • 150g Greek yoghurt + berries (~15g protein)\n"
-            "  • 3 tbsp hemp seeds on anything (+10g, tasteless)\n"
-            "  • Handful edamame (~11g/100g)"
+            "Snack options (15–20g protein target): protein bar (protein > sugar on the label), "
+            "150g Greek yoghurt + berries (~15g), 3 tbsp hemp seeds on anything (+10g, tasteless), "
+            "handful edamame (~11g/100g)."
         )
 
-    return (
-        "Which meal? breakfast / lunch / dinner / snack\n"
-        f"(Today is {'a weekend' if weekday >= 5 else 'a weekday'}.)"
-    )
+    return f"Which meal — breakfast, lunch, dinner, or snack? (Today is {'a weekend' if weekday >= 5 else 'a weekday'}.)"
 
 
 def _get_calorie_target(conn: sqlite3.Connection) -> int:
-    """Return today's calorie target based on whether a gym session was logged.
-
-    Weights day → 3,300 kcal. No session logged → 2,950 kcal (rest day default).
-    Cycling commute and sport days aren't tracked yet — that's a later refinement.
-    """
+    """Return today's calorie target based on whether a gym session was logged."""
     today = date.today().isoformat()
     sessions = get_recent_sessions(conn, limit=5)
     for s in sessions:
@@ -287,7 +347,6 @@ def _get_calorie_target(conn: sqlite3.Connection) -> int:
 
 
 def _extract_json(text: str) -> str:
-    """Extract the first {...} block from an LLM response."""
     match = re.search(r"\{.*\}", text, re.DOTALL)
     return match.group() if match else text
 
@@ -296,13 +355,9 @@ def _extract_json(text: str) -> str:
 
 
 def build_friday_summary(conn: sqlite3.Connection) -> str:
-    """Generate the Friday week summary + shopping list prompt.
-
-    Called by the scheduler job, not by handle(). Returns a formatted string
-    ready to send as a Telegram message.
-    """
+    """Generate the Friday week summary. Called by the scheduler, not handle()."""
     today = date.today()
-    week_start = (today - timedelta(days=today.weekday())).isoformat()  # Monday
+    week_start = (today - timedelta(days=today.weekday())).isoformat()
     week_end = today.isoformat()
 
     days = get_week_logs(conn, week_start, week_end)
@@ -313,11 +368,10 @@ def build_friday_summary(conn: sqlite3.Connection) -> str:
     avg_kcal = sum(d["kcal"] for d in days) / len(days)
 
     lines = [
-        f"Week summary ({week_start} → {week_end}):",
+        f"Week so far ({week_start} → {week_end}), {len(days)} day(s) logged:",
         f"  Avg protein: {avg_protein:.0f}g / {PROTEIN_TARGET_G}g target",
         f"  Avg calories: {avg_kcal:.0f} kcal",
-        f"  Days logged: {len(days)}/5",
         "",
-        "Weekend shopping — reply with what's in the fridge and I'll build the list.",
+        "Reply with what's in the fridge and I'll build the weekend shopping list.",
     ]
     return "\n".join(lines)
