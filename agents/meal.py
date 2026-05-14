@@ -104,7 +104,7 @@ Rules:
 # ── Public entry point ────────────────────────────────────────────────────────
 
 
-async def handle(conn: sqlite3.Connection, text: str) -> str:
+async def handle(conn: sqlite3.Connection, text: str, user_id: int = 0) -> str:
     """Classify the meal message and dispatch to the appropriate function."""
     raw = await complete([{"role": "user", "content": text}], system=_ROUTER_SYSTEM)
 

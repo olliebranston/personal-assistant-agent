@@ -1,8 +1,4 @@
-"""Telegram handler for meal and nutrition messages.
-
-Registered in main.py as a /meal CommandHandler and called by the message
-router when free-text intent is classified as meal/nutrition.
-"""
+"""Telegram handler for meal and nutrition messages."""
 
 from telegram import Update
 from telegram.constants import ChatAction
@@ -10,6 +6,7 @@ from telegram.ext import ContextTypes
 
 import config
 from agents import meal as meal_agent
+from services import memory
 from storage.db import get_connection
 
 _USAGE = (
@@ -23,7 +20,8 @@ _USAGE = (
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Receive a meal-related Telegram message and reply with the agent's response."""
-    if update.effective_user.id != config.TELEGRAM_ALLOWED_USER_ID:
+    user_id = update.effective_user.id
+    if user_id != config.TELEGRAM_ALLOWED_USER_ID:
         return
 
     text = _extract_text(update)
@@ -35,10 +33,12 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     conn = get_connection()
     try:
-        response = await meal_agent.handle(conn, text)
+        response = await meal_agent.handle(conn, text, user_id)
+        memory.add(user_id, "user", text)
+        memory.add(user_id, "assistant", response)
     except Exception as exc:
         print(f"[meal handler] {exc}")
-        response = "Meal agent hit an error — try again."
+        response = "Something went wrong — try again."
     finally:
         conn.close()
 

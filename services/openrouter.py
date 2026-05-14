@@ -16,24 +16,30 @@ _client = AsyncOpenAI(
 )
 
 
-async def complete(messages: list[dict], system: str = "") -> str:
+async def complete(
+    messages: list[dict],
+    system: str = "",
+    history: list[dict] | None = None,
+) -> str:
     """Send a chat completion to OpenRouter and return the response text.
 
     Args:
-        messages: Conversation history as OpenAI-format dicts,
-                  e.g. [{"role": "user", "content": "log bench 80kg 5x5"}]
-        system:   Optional system prompt. Prepended as a system message when provided.
+        messages: The current turn's messages as OpenAI-format dicts.
+        system:   Optional system prompt prepended to the conversation.
+        history:  Prior conversation turns for context (from services.memory).
+                  Inserted between the system prompt and the current message.
 
     Returns:
         The model's reply as a plain string.
 
     Raises:
-        openai.APIError (and subclasses) on network or API failures — callers decide
-        whether to retry or surface the error to the user.
+        openai.APIError (and subclasses) on network or API failures.
     """
     full_messages: list[dict] = []
     if system:
         full_messages.append({"role": "system", "content": system})
+    if history:
+        full_messages.extend(history)
     full_messages.extend(messages)
 
     response = await _client.chat.completions.create(
