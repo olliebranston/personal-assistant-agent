@@ -1,0 +1,15 @@
+# Telegram bot
+python-telegram-bot[job-queue]==21.11.1
+
+# LLM — OpenAI SDK pointed at OpenRouter
+openai>=1.52.0
+
+# Google Calendar
+google-auth-oauthlib>=1.2.0
+google-api-python-client>=2.150.0
+
+# Async HTTP (USDA FoodData Central)
+httpx>=0.27.0
+
+# Environment variables
+python-dotenv>=1.0.0

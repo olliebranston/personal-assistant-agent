@@ -1,0 +1,28 @@
+# Secrets — never commit these
+.env
+.env.local
+credentials.json
+token.json
+
+# SQLite databases
+*.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build / packaging
+dist/
+build/
+*.egg-info/
+
+# Test caches
+.pytest_cache/
+.coverage
