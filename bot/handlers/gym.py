@@ -4,10 +4,14 @@ from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
 
+import logging
+
 import config
 from agents import gym as gym_agent
 from services import memory
 from storage.db import get_connection
+
+logger = logging.getLogger(__name__)
 
 _USAGE = (
     "Gym — what do you need?\n"
@@ -36,8 +40,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         memory.add(user_id, "user", text)
         memory.add(user_id, "assistant", response)
     except Exception as exc:
-        print(f"[gym handler] {exc}")
-        response = "Something went wrong — try again."
+        logger.error("[gym] %s", exc, exc_info=True)
+        response = "Couldn't reach the AI — try again in a moment."
     finally:
         conn.close()
 
