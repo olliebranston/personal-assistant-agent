@@ -10,6 +10,8 @@ import config
 from agents.router import classify
 from bot.handlers import gym as gym_handler
 from bot.handlers import meal as meal_handler
+from services import memory
+from services.openrouter import complete
 from storage.db import init_db
 
 logging.basicConfig(
@@ -18,21 +20,52 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+_GENERAL_SYSTEM = (
+    "You are Ollie's personal assistant — a sharp, knowledgeable friend. "
+    "Be concise and direct. Plain prose. No sycophancy, no filler. "
+    "You cover gym training, nutrition, calendar, and news. "
+    "Answer what's asked. If it's clearly a gym or meal question use that knowledge directly. "
+    "Use conversation history for context on follow-ups."
+)
+
+
+async def _general_response(user_id: int, text: str) -> str:
+    """Handle messages that don't match a specific agent domain.
+
+    Uses conversation history so follow-up questions work naturally —
+    "and the week before?" after a history query makes sense in context.
+    Falls back to a friendly error if the LLM call fails.
+    """
+    hist = memory.get(user_id)
+    try:
+        response = await complete(
+            [{"role": "user", "content": text}],
+            system=_GENERAL_SYSTEM,
+            history=hist,
+        )
+    except Exception as exc:
+        logger.error("General response failed: %s", exc)
+        return "Something went wrong on my end — try again."
+
+    memory.add(user_id, "user", text)
+    memory.add(user_id, "assistant", response)
+    return response
+
 
 async def route_message(update: Update, context) -> None:
     """Catch-all handler for free-text messages.
 
-    Rejects non-allowed users first (before any LLM call), then classifies
-    the message domain and dispatches to the appropriate agent handler.
+    Rejects non-allowed users before any LLM call, classifies the domain,
+    dispatches to the right handler, or falls back to a general LLM response.
     """
-    if update.effective_user.id != config.TELEGRAM_ALLOWED_USER_ID:
-        return  # silent — don't reveal the bot to strangers
+    user_id = update.effective_user.id
+    if user_id != config.TELEGRAM_ALLOWED_USER_ID:
+        return
 
     text = (update.message.text or "").strip()
     if not text:
         return
 
-    # Show typing immediately — classify() makes an LLM call that takes 1–3s.
     await update.effective_chat.send_action(ChatAction.TYPING)
 
     domain = await classify(text)
@@ -43,9 +76,8 @@ async def route_message(update: Update, context) -> None:
     elif domain == "meal":
         await meal_handler.handle(update, context)
     else:
-        await update.message.reply_text(
-            "Not sure which agent handles that. Try /gym or /meal."
-        )
+        response = await _general_response(user_id, text)
+        await update.message.reply_text(response)
 
 
 async def error_handler(update: object, context) -> None:
@@ -54,19 +86,14 @@ async def error_handler(update: object, context) -> None:
 
 
 def main() -> None:
-    # Create tables on first run; safe to call every startup (IF NOT EXISTS).
     init_db()
     logger.info("Database ready.")
 
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
 
-    # Command handlers — registered first so /gym and /meal are never misrouted.
     app.add_handler(CommandHandler("gym", gym_handler.handle))
     app.add_handler(CommandHandler("meal", meal_handler.handle))
-
-    # Catch-all for free-text messages — must come after command handlers.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, route_message))
-
     app.add_error_handler(error_handler)
 
     logger.info("Starting polling…")
