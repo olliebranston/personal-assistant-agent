@@ -7,6 +7,7 @@ import re
 import sqlite3
 from datetime import date
 
+import services.state as state_svc
 from services.openrouter import complete
 from storage.models import (
     ExerciseSet,
@@ -17,16 +18,21 @@ from storage.models import (
     insert_set,
 )
 
-# Push→pull→legs cycle. 'short' sessions are excluded — they don't advance the cycle.
 _PPL_CYCLE = ["push", "pull", "legs"]
 
-# Exercise plans per session type, sourced directly from Gym-CONTEXT.md.
+# Key exercises to pull history for per session type.
+_KEY_EXERCISES: dict[str, list[str]] = {
+    "push": ["bench press", "overhead press"],
+    "pull": ["bent over bar rows", "pull-ups"],
+    "legs": ["squats", "romanian deadlifts"],
+}
+
 _SESSION_PLANS: dict[str, str] = {
     "push": (
         "PUSH — Chest, Shoulders, Triceps\n"
         "\n"
         "Compounds:\n"
-        "  Bench press        5×8   (~60–70kg working, target 100kg)\n"
+        "  Bench press        5×8\n"
         "  Incline DB bench   4×8\n"
         "  Chest press machine 4×8\n"
         "  Dips               4×10\n"
@@ -78,7 +84,7 @@ _SESSION_PLANS: dict[str, str] = {
         "LEGS — Quads, Hamstrings, Glutes, Calves\n"
         "\n"
         "Compounds (do Bulgarians early — they're brutal):\n"
-        "  Smith squats           5×8   (~80–100kg working, target 150kg)\n"
+        "  Smith squats           5×8\n"
         "  Bulgarian split squats 4×10\n"
         "  Leg press              4×8\n"
         "  Goblet squats          4×10  (rotate as higher-rep finisher)\n"
@@ -143,11 +149,31 @@ Rules:
 - Omit exercises you cannot parse.
 """
 
+_AFFIRMATIVES = frozenset({
+    "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "go", "done",
+    "ready", "yep", "absolutely", "let's go", "lets go",
+})
+
 # ── Public entry point ────────────────────────────────────────────────────────
 
 
 async def handle(conn: sqlite3.Connection, text: str, user_id: int = 0) -> str:
-    """Classify the user's gym message and dispatch to the appropriate function."""
+    """Classify the user's gym message and dispatch to the appropriate function.
+
+    Checks for a pending session-offer state first — if Ollie said yes to
+    "want to log?", guide him toward sending the log. Otherwise normal routing.
+    """
+    pending = state_svc.get(user_id)
+    if pending and pending.get("type") == "session_offered":
+        state_svc.clear(user_id)
+        words = set(text.lower().split())
+        if words & _AFFIRMATIVES and len(text.split()) <= 5:
+            return (
+                "Good session. Send me your lifts and I'll log them.\n"
+                "e.g. 'bench 80kg 5×5, OHP 52.5kg 4×8, dips BW 4×10'"
+            )
+        # Not a yes — fall through to normal routing (might be a direct log)
+
     raw = await complete([{"role": "user", "content": text}], system=_ROUTER_SYSTEM)
 
     try:
@@ -158,7 +184,7 @@ async def handle(conn: sqlite3.Connection, text: str, user_id: int = 0) -> str:
     action = intent.get("action")
 
     if action == "suggest":
-        return await _suggest_next_session(conn)
+        return await _suggest_next_session(conn, user_id)
     if action == "log":
         return await _log_workout(conn, text)
     if action == "history":
@@ -173,12 +199,7 @@ async def handle(conn: sqlite3.Connection, text: str, user_id: int = 0) -> str:
 
 
 def _get_next_session_type(conn: sqlite3.Connection) -> str:
-    """Return the next session type in the PPL cycle based on recent history.
-
-    Walks back through recent sessions and finds the most recent push/pull/legs.
-    Short sessions are skipped — they don't advance the cycle.
-    Returns 'push' if there's no history yet.
-    """
+    """Return the next session type in the PPL cycle based on recent history."""
     for session in get_recent_sessions(conn, limit=10):
         if session["session_type"] in _PPL_CYCLE:
             last_idx = _PPL_CYCLE.index(session["session_type"])
@@ -186,22 +207,64 @@ def _get_next_session_type(conn: sqlite3.Connection) -> str:
     return "push"
 
 
-async def _suggest_next_session(conn: sqlite3.Connection) -> str:
-    """Return the formatted exercise plan for the next PPL session."""
+def _get_progression_hints(conn: sqlite3.Connection, session_type: str) -> list[str]:
+    """Pull last logged weight for key exercises and suggest +2.5kg or +1 rep.
+
+    Returns a list of hint strings to prepend to the session plan. Empty list
+    if there's no history yet.
+    """
+    hints = []
+    for ex in _KEY_EXERCISES.get(session_type, []):
+        rows = get_last_sets_for_exercise(conn, ex, limit=1)
+        if not rows:
+            continue
+        r = rows[0]
+        weight = r["weight_kg"]
+        notes = (r.get("notes") or "").lower()
+        failed = any(w in notes for w in ("fail", "missed", "short", "couldn't", "only"))
+
+        if weight is None:
+            # Bodyweight exercise — suggest +1 rep if last attempt was clean
+            next_reps = r["reps"] if failed else r["reps"] + 1
+            hints.append(
+                f"  {ex.title()}: last {r['date']} — BW {r['sets']}×{r['reps']} → aim for {r['sets']}×{next_reps} today"
+            )
+        else:
+            next_weight = weight if failed else round((weight + 2.5) * 2) / 2
+            hints.append(
+                f"  {ex.title()}: last {r['date']} — {weight}kg {r['sets']}×{r['reps']} → try {next_weight}kg today"
+            )
+    return hints
+
+
+async def _suggest_next_session(conn: sqlite3.Connection, user_id: int = 0) -> str:
+    """Return the exercise plan for the next PPL session with progression hints."""
     session_type = _get_next_session_type(conn)
-    return f"{session_type.title()} day. Here's the plan:\n\n{_SESSION_PLANS[session_type]}"
+    hints = _get_progression_hints(conn, session_type)
+
+    parts = [f"{session_type.title()} day. Here's the plan:"]
+
+    if hints:
+        parts.append("\nProgression targets:")
+        parts.extend(hints)
+
+    parts.append(f"\n{_SESSION_PLANS[session_type]}")
+    parts.append("\nSend your lifts when you're done and I'll log the session.")
+
+    # Set state so a "yes" reply is routed back here rather than to classify()
+    state_svc.set_state(user_id, {"type": "session_offered", "session_type": session_type})
+
+    return "\n".join(parts)
 
 
 async def _log_workout(conn: sqlite3.Connection, text: str) -> str:
-    """Parse free-text workout log via LLM, save to DB, return a confirmation summary."""
+    """Parse free-text workout log via LLM, save to DB, return confirmation."""
     raw = await complete([{"role": "user", "content": text}], system=_LOG_PARSER_SYSTEM)
 
     try:
         parsed = json.loads(_extract_json(raw))
     except (json.JSONDecodeError, ValueError):
-        return (
-            "Couldn't parse that. Try: 'bench 80kg 5×5, incline DB 30kg 4×8, dips 4×10'"
-        )
+        return "Couldn't parse that. Try: 'bench 80kg 5×5, incline DB 30kg 4×8, dips 4×10'"
 
     exercises = parsed.get("exercises", [])
     if not exercises:
@@ -230,8 +293,8 @@ async def _log_workout(conn: sqlite3.Connection, text: str) -> str:
         ))
 
         weight_str = f"{weight}kg" if weight is not None else "BW"
-        warmup_str = f" (s{warmup}kg)" if warmup is not None else ""
-        note_str = f"  [{notes}]" if notes else ""
+        warmup_str = f" (warmup {warmup}kg)" if warmup is not None else ""
+        note_str = f"  {notes}" if notes else ""
         lines.append(
             f"  {ex.get('exercise', 'unknown')}  {weight_str}{warmup_str}  {sets}×{reps}{note_str}"
         )
@@ -240,7 +303,7 @@ async def _log_workout(conn: sqlite3.Connection, text: str) -> str:
 
 
 async def _query_history(conn: sqlite3.Connection, exercise: str) -> str:
-    """Return the last 5 logged sets for an exercise, formatted for display."""
+    """Return the last 5 logged sets for an exercise."""
     if not exercise:
         return "Which exercise? e.g. 'bench history' or 'squat last'"
 
@@ -261,10 +324,6 @@ async def _query_history(conn: sqlite3.Connection, exercise: str) -> str:
 
 
 def _extract_json(text: str) -> str:
-    """Extract the first {...} block from an LLM response.
-
-    LLMs occasionally wrap JSON in prose despite explicit instructions. This
-    makes downstream json.loads calls robust to that.
-    """
+    """Extract the first {...} block from an LLM response."""
     match = re.search(r"\{.*\}", text, re.DOTALL)
     return match.group() if match else text
