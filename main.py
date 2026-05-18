@@ -1,7 +1,10 @@
-"""Entry point. Initialises the database, registers handlers, and starts polling."""
+"""Entry point. Initialises the database, registers handlers, and starts in webhook mode."""
 
 import logging
+from contextlib import asynccontextmanager
 
+import uvicorn
+from fastapi import FastAPI, Request, Response
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
@@ -22,7 +25,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     level=logging.INFO,
 )
-log_scrubber.install()  # must run after basicConfig so handlers exist
+log_scrubber.install()
 logger = logging.getLogger(__name__)
 
 _GENERAL_SYSTEM = (
@@ -33,14 +36,11 @@ _GENERAL_SYSTEM = (
     "Use conversation history for context on follow-ups."
 )
 
+_ptb_app: Application | None = None
+
 
 async def _general_response(user_id: int, text: str) -> str:
-    """Handle messages that don't match a specific agent domain.
-
-    Uses conversation history so follow-up questions work naturally —
-    "and the week before?" after a history query makes sense in context.
-    Falls back to a friendly error if the LLM call fails.
-    """
+    """Handle messages that don't match a specific agent domain."""
     hist = memory.get(user_id)
     try:
         response = await complete(
@@ -58,11 +58,7 @@ async def _general_response(user_id: int, text: str) -> str:
 
 
 async def route_message(update: Update, context) -> None:
-    """Catch-all handler for free-text messages.
-
-    Rejects non-allowed users before any LLM call, classifies the domain,
-    dispatches to the right handler, or falls back to a general LLM response.
-    """
+    """Catch-all handler for free-text messages."""
     user_id = update.effective_user.id
     if user_id != config.TELEGRAM_ALLOWED_USER_ID:
         return
@@ -73,7 +69,6 @@ async def route_message(update: Update, context) -> None:
 
     await update.effective_chat.send_action(ChatAction.TYPING)
 
-    # If there's a pending confirmation, bypass the domain classifier and route directly.
     pending = state_svc.get(user_id)
     if pending:
         if pending.get("type") == "food_log":
@@ -101,26 +96,67 @@ async def route_message(update: Update, context) -> None:
 
 
 async def error_handler(update: object, context) -> None:
-    """Log any unhandled exception that bubbles up from a handler."""
     logger.error("Unhandled error for update %s: %s", update, context.error, exc_info=context.error)
 
 
-def main() -> None:
+# ── FastAPI app with PTB lifecycle ────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start the Telegram bot (handlers + scheduler) on startup; stop on shutdown.
+
+    Uses PTB's async context manager so initialize() and shutdown() are called
+    automatically. app.start() kicks off the update dispatcher and job queue.
+    """
+    global _ptb_app
     init_db()
     logger.info("Database ready.")
 
-    app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
+    _ptb_app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("calendar", calendar_handler.handle))
-    app.add_handler(CommandHandler("gym", gym_handler.handle))
-    app.add_handler(CommandHandler("meal", meal_handler.handle))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, route_message))
-    app.add_error_handler(error_handler)
+    _ptb_app.add_handler(CommandHandler("calendar", calendar_handler.handle))
+    _ptb_app.add_handler(CommandHandler("gym", gym_handler.handle))
+    _ptb_app.add_handler(CommandHandler("meal", meal_handler.handle))
+    _ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, route_message))
+    _ptb_app.add_error_handler(error_handler)
 
-    register_jobs(app)
+    register_jobs(_ptb_app)
 
-    logger.info("Starting polling…")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    await _ptb_app.bot.set_webhook(url=config.WEBHOOK_URL)
+    logger.info("Webhook registered: %s", config.WEBHOOK_URL)
+
+    async with _ptb_app:
+        await _ptb_app.start()
+        logger.info("Bot running in webhook mode.")
+        yield
+        await _ptb_app.stop()
+        logger.info("Bot stopped.")
+
+
+web_app = FastAPI(lifespan=lifespan)
+
+
+@web_app.post("/webhook")
+async def webhook(request: Request) -> Response:
+    """Receive a Telegram update and hand it to the PTB dispatcher."""
+    data = await request.json()
+    update = Update.de_json(data, _ptb_app.bot)
+    await _ptb_app.update_queue.put(update)
+    return Response(status_code=200)
+
+
+@web_app.get("/health")
+async def health() -> Response:
+    return Response(status_code=200)
+
+
+@web_app.get("/")
+async def root() -> Response:
+    return Response(status_code=200)
+
+
+def main() -> None:
+    uvicorn.run(web_app, host="0.0.0.0", port=config.PORT)
 
 
 if __name__ == "__main__":

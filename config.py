@@ -16,3 +16,6 @@ USDA_API_KEY: str = os.environ["USDA_API_KEY"]
 
 GOOGLE_CREDENTIALS_FILE: str = os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
 GOOGLE_TOKEN_FILE: str = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
+
+WEBHOOK_URL: str = os.environ["WEBHOOK_URL"]
+PORT: int = int(os.getenv("PORT", "8000"))
