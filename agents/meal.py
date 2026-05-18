@@ -354,6 +354,22 @@ def _extract_json(text: str) -> str:
 # ── Scheduler-facing functions (called by bot/scheduler.py) ──────────────────
 
 
+def daily_summary(conn: sqlite3.Connection) -> str:
+    """Public wrapper around _daily_summary for the scheduler."""
+    return _daily_summary(conn)
+
+
+def get_breakfast(weekday: int) -> str:
+    """Return today's breakfast from the rotation. weekday: Monday=0, Sunday=6."""
+    return _BREAKFAST_ROTATION.get(weekday, _BREAKFAST_ROTATION[0])
+
+
+def get_lunch_rotation() -> str:
+    """Return the current week's lunch rotation based on ISO week number."""
+    idx = date.today().isocalendar()[1] % len(_LUNCH_ROTATIONS)
+    return _LUNCH_ROTATIONS[idx]
+
+
 def build_friday_summary(conn: sqlite3.Connection) -> str:
     """Generate the Friday week summary. Called by the scheduler, not handle()."""
     today = date.today()

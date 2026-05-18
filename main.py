@@ -10,8 +10,10 @@ import config
 import services.state as state_svc
 from utils import log_scrubber
 from agents.router import classify
+from bot.handlers import calendar as calendar_handler
 from bot.handlers import gym as gym_handler
 from bot.handlers import meal as meal_handler
+from bot.scheduler import register_jobs
 from services import memory
 from services.openrouter import complete
 from storage.db import init_db
@@ -80,6 +82,9 @@ async def route_message(update: Update, context) -> None:
         if pending.get("type") == "session_offered":
             await gym_handler.handle(update, context)
             return
+        if pending.get("type") == "event_create":
+            await calendar_handler.handle(update, context)
+            return
 
     domain = await classify(text)
     logger.info("Routed '%s' → %s", text[:60], domain)
@@ -88,6 +93,8 @@ async def route_message(update: Update, context) -> None:
         await gym_handler.handle(update, context)
     elif domain == "meal":
         await meal_handler.handle(update, context)
+    elif domain == "calendar":
+        await calendar_handler.handle(update, context)
     else:
         response = await _general_response(user_id, text)
         await update.message.reply_text(response)
@@ -104,10 +111,13 @@ def main() -> None:
 
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
 
+    app.add_handler(CommandHandler("calendar", calendar_handler.handle))
     app.add_handler(CommandHandler("gym", gym_handler.handle))
     app.add_handler(CommandHandler("meal", meal_handler.handle))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, route_message))
     app.add_error_handler(error_handler)
+
+    register_jobs(app)
 
     logger.info("Starting polling…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

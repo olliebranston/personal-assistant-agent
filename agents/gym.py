@@ -198,7 +198,7 @@ async def handle(conn: sqlite3.Connection, text: str, user_id: int = 0) -> str:
 # ── Private helpers ───────────────────────────────────────────────────────────
 
 
-def _get_next_session_type(conn: sqlite3.Connection) -> str:
+def get_next_session_type(conn: sqlite3.Connection) -> str:
     """Return the next session type in the PPL cycle based on recent history."""
     for session in get_recent_sessions(conn, limit=10):
         if session["session_type"] in _PPL_CYCLE:
@@ -239,7 +239,7 @@ def _get_progression_hints(conn: sqlite3.Connection, session_type: str) -> list[
 
 async def _suggest_next_session(conn: sqlite3.Connection, user_id: int = 0) -> str:
     """Return the exercise plan for the next PPL session with progression hints."""
-    session_type = _get_next_session_type(conn)
+    session_type = get_next_session_type(conn)
     hints = _get_progression_hints(conn, session_type)
 
     parts = [f"{session_type.title()} day. Here's the plan:"]
