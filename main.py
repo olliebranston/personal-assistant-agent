@@ -13,6 +13,7 @@ from agents.router import classify
 from bot.handlers import calendar as calendar_handler
 from bot.handlers import gym as gym_handler
 from bot.handlers import meal as meal_handler
+from bot.handlers import news as news_handler
 from bot.scheduler import register_jobs
 from services import memory
 from services.openrouter import complete
@@ -83,6 +84,8 @@ async def route_message(update: Update, context) -> None:
         await meal_handler.handle(update, context)
     elif domain == "calendar":
         await calendar_handler.handle(update, context)
+    elif domain == "news":
+        await news_handler.handle(update, context)
     else:
         response = await _general_response(user_id, text)
         await update.message.reply_text(response)
@@ -101,6 +104,7 @@ def main() -> None:
     app.add_handler(CommandHandler("calendar", calendar_handler.handle))
     app.add_handler(CommandHandler("gym", gym_handler.handle))
     app.add_handler(CommandHandler("meal", meal_handler.handle))
+    app.add_handler(CommandHandler("news", news_handler.handle))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, route_message))
     app.add_error_handler(error_handler)
 
