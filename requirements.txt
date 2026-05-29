@@ -16,7 +16,3 @@ python-dotenv>=1.0.0
 
 # Timezone data (required for zoneinfo on Windows; harmless on Linux)
 tzdata>=2024.1
-
-# Web server (webhook mode)
-fastapi>=0.110.0
-uvicorn>=0.29.0
