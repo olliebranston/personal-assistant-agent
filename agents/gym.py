@@ -30,49 +30,52 @@ _KEY_EXERCISES: dict[str, list[str]] = {
 # Slimmed-down plans: 1 main compound, 2–3 accessories, pick-1 isolation, 2 alternatives.
 _SESSION_PLANS: dict[str, str] = {
     "push": (
-        "PUSH — Chest, Shoulders, Triceps\n"
+        "TODAY — PUSH (Chest, Shoulders, Triceps)\n"
+        "• bench press 5×8\n"
+        "• OHP 4×8\n"
+        "• rope pulldowns 4×10\n"
+        "• DB lateral raises 4×15\n"
         "\n"
-        "  Bench press         5×8   ← main\n"
-        "  OHP                 4×8\n"
-        "  Rope pulldowns      4×10\n"
-        "  DB lateral raises   4×15\n"
+        "PICK 1 ISOLATION\n"
+        "• pec fly 4×8  ·  cable fly 3×10  ·  incline DB bench 4×8\n"
         "\n"
-        "Pick 1 isolation: Pec fly 4×8  ·  Cable fly 3×10  ·  Incline DB bench 4×8\n"
-        "\n"
-        "Alternatives if time: Dips 4×10  ·  Skullcrushers 4×8\n"
-        "Ab finisher: crunches / plank"
+        "IF TIME\n"
+        "• dips 4×10  ·  skullcrushers 4×8  ·  ab finisher"
     ),
     "pull": (
-        "PULL — Back, Biceps, Rear Delts\n"
+        "TODAY — PULL (Back, Biceps, Rear Delts)\n"
+        "• pull-ups 4×5–8\n"
+        "• bent over bar rows 5×10\n"
+        "• face pulls 4×10\n"
+        "• bar curls 4×10\n"
         "\n"
-        "  Pull-ups            4×5–8  ← main\n"
-        "  Bent over bar rows  5×10\n"
-        "  Face pulls          4×10\n"
-        "  Bar curls           4×10\n"
+        "PICK 1 ROW\n"
+        "• machine rows 4×8  ·  cable rows 4×8  ·  T-bar rows 3×10\n"
         "\n"
-        "Pick 1 row: Machine rows 4×8  ·  Cable rows 4×8  ·  T-bar rows 3×10\n"
-        "\n"
-        "Alternatives if time: Incline DB curls 4×10  ·  Cable delt fly 4×8"
+        "IF TIME\n"
+        "• incline DB curls 4×10  ·  cable delt fly 4×8"
     ),
     "legs": (
-        "LEGS — Quads, Hamstrings, Glutes, Calves\n"
+        "TODAY — LEGS (Quads, Hamstrings, Glutes, Calves)\n"
+        "• Bulgarian split squats 4×10  ← do these first, they're brutal\n"
+        "• Smith squats 5×8\n"
+        "• Romanian deadlifts 4×10\n"
+        "• hamstring curls 3×8\n"
         "\n"
-        "  Smith squats           5×8   ← main\n"
-        "  Romanian deadlifts     4×10  (hip hinge, bar close, soft knee)\n"
-        "  Bulgarian split squats 4×10  (do these early — brutal)\n"
-        "  Hamstring curls        3×8\n"
+        "PICK 1 ISOLATION\n"
+        "• quad extensions 4×10  ·  calf raises 4×15  ·  hip extensions 4×10\n"
         "\n"
-        "Pick 1 isolation: Quad extensions 4×10  ·  Calf raises 4×15  ·  Hip extensions 4×10\n"
-        "\n"
-        "Alternatives if time: Leg press 4×8  ·  Goblet squats 4×10"
+        "IF TIME\n"
+        "• leg press 4×8  ·  goblet squats 4×10"
     ),
     "short": (
-        "SHORT SESSION (<30 mins) — pick one:\n"
+        "TODAY — SHORT SESSION (<30 mins)\n"
         "\n"
-        "  Missed muscle?    5–6 exercises, one area, minimal rest\n"
-        "  Cardio            20–25 min run (intervals or tempo)\n"
-        "  Full-body circuit Bench / rows / squats / press, 3×8, move fast\n"
-        "  Weak point        arms, rear delts, calves"
+        "PICK ONE FOCUS\n"
+        "• missed muscle — 5–6 exercises, one area, minimal rest\n"
+        "• cardio — 20–25 min run (intervals or tempo)\n"
+        "• full-body circuit — bench / rows / squats / press, 3×8, move fast\n"
+        "• weak point — arms, rear delts, calves tend to get dropped"
     ),
 }
 
@@ -183,21 +186,23 @@ def _get_last_session_of_type(conn: sqlite3.Connection, session_type: str) -> di
 
 
 def _format_last_session(session: dict) -> str:
-    """Format a past session as a compact one-line summary for display."""
+    """Format a past session as a bulleted block with an all-caps heading."""
     try:
         days_ago = (date.today() - date.fromisoformat(session["date"])).days
-        age = f"{days_ago}d ago" if days_ago > 0 else "today"
+        age = f"{days_ago} day{'s' if days_ago != 1 else ''} ago" if days_ago > 0 else "today"
     except (ValueError, KeyError):
         age = session.get("date", "?")
 
-    sets = session.get("sets", [])
-    parts = []
-    for ex in sets[:6]:
+    lines = [f"LAST {session['session_type'].upper()} · {age}"]
+    for ex in session.get("sets", []):
         weight = f"{ex['weight_kg']}kg" if ex.get("weight_kg") is not None else "BW"
-        parts.append(f"{ex['exercise'].title()} {weight} {ex['sets']}×{ex['reps']}")
+        warmup = f" (warm-up {ex['warmup_kg']}kg)" if ex.get("warmup_kg") else ""
+        lines.append(f"• {ex['exercise']} — {weight}{warmup} {ex['sets']}×{ex['reps']}")
 
-    exercises_str = ", ".join(parts) if parts else "no exercises recorded"
-    return f"Last {session['session_type']} ({age}): {exercises_str}"
+    if len(lines) == 1:
+        lines.append("• no exercises recorded")
+
+    return "\n".join(lines)
 
 
 def _get_progression_hints(conn: sqlite3.Connection, session_type: str) -> list[str]:
@@ -236,14 +241,16 @@ async def _suggest_next_session(
 
     parts: list[str] = []
 
-    # Show the last logged session of this type at the top
+    # Show the full last logged session of this type at the top
     last = _get_last_session_of_type(conn, session_type)
     if last:
         parts.append(_format_last_session(last))
         parts.append("")
 
+    # Progression hints slot in before the plan
     hints = _get_progression_hints(conn, session_type)
     if hints:
+        parts.append("TARGETS")
         parts.extend(hints)
         parts.append("")
 

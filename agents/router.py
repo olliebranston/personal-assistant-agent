@@ -53,18 +53,16 @@ def set_last_domain(user_id: int, domain: str) -> None:
 async def classify(text: str, user_id: int = 0) -> str:
     """Return the domain name this message belongs to.
 
-    Passes recent conversation history to the LLM for context on short follow-ups.
-    Falls back to the last known domain if the classifier returns 'unknown' and
-    the message is short (likely a continuation of the prior exchange).
+    Classifies purely on message content — no conversation history passed, as that
+    biases the LLM toward the previous domain for unrelated messages.
+    Falls back to the last known domain only for very short follow-ups (≤3 words)
+    that are genuinely context-dependent (e.g. "yes", "cancel", "done").
 
     Returns one of: 'gym' | 'meal' | 'calendar' | 'news' | 'unknown'.
     """
-    hist = memory_svc.get(user_id) if user_id else None
-
     raw = await complete(
         [{"role": "user", "content": text}],
         system=_SYSTEM,
-        history=hist,
     )
     try:
         data = json.loads(_extract_json(raw))
@@ -72,8 +70,8 @@ async def classify(text: str, user_id: int = 0) -> str:
     except (json.JSONDecodeError, ValueError):
         domain = "unknown"
 
-    # Fall back to last known domain for short ambiguous messages
-    if domain == "unknown" and len(text.split()) <= 6 and user_id:
+    # Only fall back to last domain for very short ambiguous messages
+    if domain == "unknown" and len(text.split()) <= 3 and user_id:
         last = get_last_domain(user_id)
         if last:
             domain = last

@@ -76,26 +76,10 @@ async def handle(text: str, user_id: int = 0) -> str:
         sections.append("*Chelsea FC*\nNo news in the last 48 hours.")
 
     # ── Horses ─────────────────────────────────────────────────────────────────
-    if horse_map:
-        blocks: list[str] = []
-        for horse, items in horse_map.items():
-            details = _HORSE_DETAILS.get(horse, "")
-            articles = "\n".join(
-                f"  - {item['title']}. {item['summary'][:200]}"
-                for item in items
-            )
-            blocks.append(f"HORSE: {horse} ({details})\n{articles}")
-
-        try:
-            horse_out = await complete(
-                [{"role": "user", "content": "\n\n".join(blocks)}],
-                system=_RACING_SYSTEM,
-            )
-            sections.append(f"*Your horses*\n{horse_out.strip()}")
-        except Exception as exc:
-            logger.error("[news] Racing LLM call failed: %s", exc)
-            sections.append("*Your horses*\nCouldn't summarise racing news right now.")
-    else:
-        sections.append("*Your horses*\nNo recent news found.")
+    # Google News RSS removed (hallucinated results). Racing API integration pending.
+    sections.append(
+        "*Your horses*\nNo verified data available — Racing API integration coming. "
+        "Sign up at theracingapi.com and share the key to enable this."
+    )
 
     return "\n\n".join(sections)

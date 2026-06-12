@@ -160,113 +160,13 @@ async def _fetch_chelsea_from_url(url: str) -> list[dict]:
 #
 # Horse IDs are stable — cache them permanently in a module-level dict with no TTL.
 
-async def fetch_horse_items(horse: str) -> list[dict]:
-    """Fetch recent news for one horse. Tries Racing Post, falls back to Google News RSS.
-
-    Each item: {title, summary, published, link, source}.
-    Returns [] if nothing found.
-    """
-    cache_key = f"horse:{horse}"
-    cached = _get_cache(cache_key)
-    if cached is not None:
-        return cached  # type: ignore[return-value]
-
-    items = await _try_racing_post(horse)
-    if not items:
-        items = await _try_google_news(horse)
-
-    _set_cache(cache_key, items)
-    return items
-
-
-async def _try_racing_post(horse: str) -> list[dict]:
-    """Attempt Racing Post horse search. Returns [] if blocked or nothing parseable."""
-    url = _RACING_POST_SEARCH.format(quote_plus(horse))
-    try:
-        async with httpx.AsyncClient(
-            timeout=10.0, headers=_HEADERS, follow_redirects=True
-        ) as client:
-            resp = await client.get(url)
-            if resp.status_code in (403, 429, 503):
-                logger.debug("Racing Post blocked (HTTP %d) for %s", resp.status_code, horse)
-                return []
-            resp.raise_for_status()
-
-        if any(s in resp.text for s in ("Just a moment", "cf-browser-verification", "Please Wait")):
-            logger.debug("Racing Post Cloudflare challenge for %s", horse)
-            return []
-
-        soup = BeautifulSoup(resp.text, "html.parser")
-        items: list[dict] = []
-
-        for selector in (
-            ".RC-horsesSearch__card",
-            "[data-test-id='horse-search-result']",
-            ".js-horse-search-result",
-            "a.RC-horsesSearch__link",
-        ):
-            for el in soup.select(selector)[:3]:
-                text = el.get_text(separator=" ", strip=True)
-                link_el = el if el.name == "a" else el.select_one("a[href]")
-                href = (link_el or {}).get("href", "")
-                link = f"https://www.racingpost.com{href}" if href.startswith("/") else href
-                if horse.split()[0].lower() in text.lower():
-                    items.append({
-                        "title": text[:200],
-                        "summary": "",
-                        "published": "",
-                        "link": link,
-                        "source": "racingpost",
-                    })
-            if items:
-                break
-
-        return items
-    except Exception as exc:
-        logger.debug("Racing Post error for %s: %s", horse, exc)
-        return []
-
-
-async def _try_google_news(horse: str) -> list[dict]:
-    """Google News RSS search for a horse. Returns [] on failure."""
-    query = quote_plus(f"{horse} horse racing")
-    url = _GOOGLE_NEWS_RSS.format(query)
-    try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            resp = await client.get(url, headers=_HEADERS)
-            resp.raise_for_status()
-        feed = feedparser.parse(resp.text)
-        items: list[dict] = []
-        first_word = horse.split()[0].lower()
-        for entry in feed.entries[:6]:
-            title = entry.get("title", "")
-            if first_word not in title.lower():
-                continue  # skip obvious name collisions
-            summary = BeautifulSoup(entry.get("summary", ""), "html.parser").get_text()
-            items.append({
-                "title": title,
-                "summary": summary[:300],
-                "published": entry.get("published", ""),
-                "link": entry.get("link", ""),
-                "source": "google_news",
-            })
-        return items
-    except Exception as exc:
-        logger.warning("Google News fetch for %s failed: %s", horse, exc)
-        return []
-
-
 async def fetch_all_horse_items() -> dict[str, list[dict]]:
-    """Fetch news for all horses concurrently.
+    """Horse racing data is pending Racing API integration — returns empty dict.
 
-    Returns {horse_name: [items]} — only horses that have at least one item.
+    Google News RSS was removed because it produced hallucinated results
+    (wrong courses, wrong dates, fabricated race details). Racing Post is
+    Cloudflare-blocked in production.
+
+    See the TODO comment above for the Racing API implementation plan.
     """
-    results = await asyncio.gather(
-        *[fetch_horse_items(horse) for horse in HORSES],
-        return_exceptions=True,
-    )
-    return {
-        horse: result
-        for horse, result in zip(HORSES, results)
-        if isinstance(result, list) and result
-    }
+    return {}
