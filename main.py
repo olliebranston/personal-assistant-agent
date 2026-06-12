@@ -9,7 +9,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 import config
 import services.state as state_svc
 from utils import log_scrubber
-from agents.router import classify
+from agents.router import classify, set_last_domain
 from bot.handlers import calendar as calendar_handler
 from bot.handlers import gym as gym_handler
 from bot.handlers import meal as meal_handler
@@ -27,11 +27,12 @@ log_scrubber.install()
 logger = logging.getLogger(__name__)
 
 _GENERAL_SYSTEM = (
-    "You are Ollie's personal assistant — a sharp, knowledgeable friend. "
-    "Be concise and direct. Plain prose. No sycophancy, no filler. "
-    "You cover gym training, nutrition, calendar, and news. "
-    "Answer what's asked. If it's clearly a gym or meal question use that knowledge directly. "
-    "Use conversation history for context on follow-ups."
+    "You are Robin — Ollie's personal assistant. "
+    "Talk like a sharp, switched-on friend who knows training, nutrition, scheduling, and sports inside out. "
+    "Direct, informal, never robotic. No waffle, no filler, no 'great question!'. "
+    "Dry humour where it fits — never forced. "
+    "Answer what's asked. One or two sentences is usually enough. "
+    "Use conversation history to understand follow-ups without asking Ollie to repeat himself."
 )
 
 
@@ -75,16 +76,20 @@ async def route_message(update: Update, context) -> None:
             await calendar_handler.handle(update, context)
             return
 
-    domain = await classify(text)
+    domain = await classify(text, user_id=user_id)
     logger.info("Routed '%s' → %s", text[:60], domain)
 
     if domain == "gym":
+        set_last_domain(user_id, "gym")
         await gym_handler.handle(update, context)
     elif domain == "meal":
+        set_last_domain(user_id, "meal")
         await meal_handler.handle(update, context)
     elif domain == "calendar":
+        set_last_domain(user_id, "calendar")
         await calendar_handler.handle(update, context)
     elif domain == "news":
+        set_last_domain(user_id, "news")
         await news_handler.handle(update, context)
     else:
         response = await _general_response(user_id, text)

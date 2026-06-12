@@ -210,6 +210,27 @@ def get_daily_totals(conn: sqlite3.Connection, date: str) -> dict:
     return dict(row) if row else {"protein_g": 0.0, "kcal": 0.0}
 
 
+def update_food_log(
+    conn: sqlite3.Connection,
+    log_id: int,
+    protein_g: float,
+    kcal: float,
+    description: str | None = None,
+) -> None:
+    """Update protein/kcal (and optionally description) on an existing food log entry."""
+    if description is not None:
+        conn.execute(
+            "UPDATE food_logs SET protein_g=?, kcal=?, description=? WHERE id=?",
+            (protein_g, kcal, description, log_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE food_logs SET protein_g=?, kcal=? WHERE id=?",
+            (protein_g, kcal, log_id),
+        )
+    conn.commit()
+
+
 def get_week_logs(conn: sqlite3.Connection, start_date: str, end_date: str) -> list[dict]:
     """Return daily totals for each day in the range [start_date, end_date].
 

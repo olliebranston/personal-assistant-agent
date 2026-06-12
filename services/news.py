@@ -41,6 +41,7 @@ def _set_cache(key: str, value) -> None:
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 BBC_CHELSEA_RSS = "https://feeds.bbci.co.uk/sport/football/chelsea/rss.xml"
+_SKY_CHELSEA_RSS = "https://www.skysports.com/rss/12040"
 _RACING_POST_SEARCH = "https://www.racingpost.com/horses/search/results/?q={}"
 _GOOGLE_NEWS_RSS = "https://news.google.com/rss/search?q={}&hl=en-GB&gl=GB&ceid=GB:en"
 
@@ -87,10 +88,28 @@ async def fetch_chelsea_items() -> list[dict]:
 
     items: list[dict] = []
     try:
+        items = await _fetch_chelsea_from_url(BBC_CHELSEA_RSS)
+        if not items:
+            logger.info("BBC Chelsea RSS returned 0 items — trying Sky Sports fallback")
+            items = await _fetch_chelsea_from_url(_SKY_CHELSEA_RSS)
+    except Exception as exc:
+        logger.warning("Chelsea RSS fetch failed: %s", exc)
+
+    _set_cache("chelsea", items)
+    return items
+
+
+async def _fetch_chelsea_from_url(url: str) -> list[dict]:
+    """Fetch and parse a Chelsea RSS feed URL. Returns list of items (may be empty)."""
+    items: list[dict] = []
+    try:
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            resp = await client.get(BBC_CHELSEA_RSS, headers=_HEADERS)
+            resp = await client.get(url, headers=_HEADERS)
             resp.raise_for_status()
-        feed = feedparser.parse(resp.text)
+        feed = feedparser.parse(resp.content)  # bytes avoids encoding mismatches
+        logger.debug("Chelsea RSS %s: bozo=%s entries=%d", url, feed.bozo, len(feed.entries))
+        if feed.bozo:
+            logger.warning("Chelsea RSS malformed (%s): %s", url, feed.bozo_exception)
         now = time.time()
 
         for entry in feed.entries:
@@ -117,13 +136,29 @@ async def fetch_chelsea_items() -> list[dict]:
                 "link": entry.get("link", ""),
             })
     except Exception as exc:
-        logger.warning("Chelsea RSS fetch failed: %s", exc)
+        logger.warning("Chelsea RSS fetch failed (%s): %s", url, exc)
 
-    _set_cache("chelsea", items)
     return items
 
 
 # ── Horse racing ──────────────────────────────────────────────────────────────
+#
+# TODO: Replace the Racing Post / Google News approach below with The Racing API.
+#
+# Sign up at theracingapi.com/register for a free API key, then:
+#   1. Add RACING_API_KEY to config.py and .env
+#   2. Implement _lookup_horse_id(name, client) → str | None
+#      GET https://api.theracingapi.com/v1/horses/search?name={name}
+#      Auth: httpx.BasicAuth(RACING_API_KEY, "x")
+#   3. Implement fetch_horse_entries(horse_id, client) and fetch_horse_results(horse_id, client)
+#      GET /v1/entries?horse_id={id}&start_date={today}
+#      GET /v1/results?horse_id={id}&start_date={14d_ago}&end_date={today}
+#   4. Replace fetch_all_horse_items() with fetch_all_horse_data() that returns
+#      {horse_name: {entries: [...], results: [...]}} — no LLM summarisation needed.
+#   5. Update agents/news.py to format structured data directly (no _RACING_SYSTEM LLM call).
+#   6. Remove fetch_horse_items, _try_racing_post, _try_google_news and their constants below.
+#
+# Horse IDs are stable — cache them permanently in a module-level dict with no TTL.
 
 async def fetch_horse_items(horse: str) -> list[dict]:
     """Fetch recent news for one horse. Tries Racing Post, falls back to Google News RSS.

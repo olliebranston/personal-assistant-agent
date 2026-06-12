@@ -27,88 +27,52 @@ _KEY_EXERCISES: dict[str, list[str]] = {
     "legs": ["squats", "romanian deadlifts"],
 }
 
+# Slimmed-down plans: 1 main compound, 2–3 accessories, pick-1 isolation, 2 alternatives.
 _SESSION_PLANS: dict[str, str] = {
     "push": (
         "PUSH — Chest, Shoulders, Triceps\n"
         "\n"
-        "Compounds:\n"
-        "  Bench press        5×8\n"
-        "  Incline DB bench   4×8\n"
-        "  Chest press machine 4×8\n"
-        "  Dips               4×10\n"
+        "  Bench press         5×8   ← main\n"
+        "  OHP                 4×8\n"
+        "  Rope pulldowns      4×10\n"
+        "  DB lateral raises   4×15\n"
         "\n"
-        "Shoulders:\n"
-        "  OHP                4×8\n"
-        "  DB lateral raises  4×15\n"
-        "  Cable/machine laterals 3×10  (rotate with DB raises)\n"
+        "Pick 1 isolation: Pec fly 4×8  ·  Cable fly 3×10  ·  Incline DB bench 4×8\n"
         "\n"
-        "Triceps:\n"
-        "  Rope pulldowns     4×8–10\n"
-        "  Skullcrushers      4×8\n"
-        "  Tricep extension   3×10  (drop set candidate)\n"
-        "\n"
-        "Chest isolation — pick 1–2:\n"
-        "  Pec fly machine 4×8 / Cable pec fly 3×10 / Close-grip DB bench 4×8\n"
-        "\n"
-        "Ab finisher: 2–3 of crunches, sit-ups, plank"
+        "Alternatives if time: Dips 4×10  ·  Skullcrushers 4×8\n"
+        "Ab finisher: crunches / plank"
     ),
     "pull": (
         "PULL — Back, Biceps, Rear Delts\n"
         "\n"
-        "Vertical pulls:\n"
-        "  Pull-ups/chin-ups  4×5–8\n"
-        "  Cable pulldowns    4×8–10\n"
-        "\n"
-        "Rows:\n"
+        "  Pull-ups            4×5–8  ← main\n"
         "  Bent over bar rows  5×10\n"
-        "  Single DB rows      4×10  (pull to hip, not chest)\n"
-        "  Machine rows        4×8   (shoulder-width grip)\n"
-        "  Cable rows          4×8   (shoulder-width grip)\n"
-        "  T-bar rows          3×8–10  (rotate in for variety)\n"
+        "  Face pulls          4×10\n"
+        "  Bar curls           4×10\n"
         "\n"
-        "Rear delts (don't skip):\n"
-        "  Face pulls         4×10\n"
-        "  Cable delt fly     4×8\n"
-        "  Machine delt fly   4×10  (rotate)\n"
+        "Pick 1 row: Machine rows 4×8  ·  Cable rows 4×8  ·  T-bar rows 3×10\n"
         "\n"
-        "Biceps:\n"
-        "  Bar curls          4×10\n"
-        "  Incline DB curls   4×10  (long head stretch)\n"
-        "  EZ bar curls       4×8   (rotate with bar curls)\n"
-        "  Machine/DB curls   3×8–10  (drop set candidate)\n"
-        "\n"
-        "Back accessories (rotate in, not every session):\n"
-        "  Shrugs 3×10 / Upright rows 4×10 / DB pullover 3×10"
+        "Alternatives if time: Incline DB curls 4×10  ·  Cable delt fly 4×8"
     ),
     "legs": (
         "LEGS — Quads, Hamstrings, Glutes, Calves\n"
         "\n"
-        "Compounds (do Bulgarians early — they're brutal):\n"
-        "  Smith squats           5×8\n"
-        "  Bulgarian split squats 4×10\n"
-        "  Leg press              4×8\n"
-        "  Goblet squats          4×10  (rotate as higher-rep finisher)\n"
-        "\n"
-        "Hamstrings / posterior chain:\n"
+        "  Smith squats           5×8   ← main\n"
         "  Romanian deadlifts     4×10  (hip hinge, bar close, soft knee)\n"
-        "  Bent-over bell lifts   5×8   (brace hard)\n"
+        "  Bulgarian split squats 4×10  (do these early — brutal)\n"
         "  Hamstring curls        3×8\n"
-        "  Lunges                 3×10 each leg\n"
         "\n"
-        "Isolation:\n"
-        "  Quad extensions        4×8–10\n"
-        "  Hip extensions/abductors 4×10\n"
-        "  Calf raises            4×15  (slow eccentric)\n"
+        "Pick 1 isolation: Quad extensions 4×10  ·  Calf raises 4×15  ·  Hip extensions 4×10\n"
         "\n"
-        "Time-tight? Core four: Squats + Bulgarians + RDLs + hamstring curls"
+        "Alternatives if time: Leg press 4×8  ·  Goblet squats 4×10"
     ),
     "short": (
-        "SHORT SESSION (<30 mins) — pick one focus:\n"
+        "SHORT SESSION (<30 mins) — pick one:\n"
         "\n"
-        "  Missed muscle group  — 5–6 exercises, one area, minimal rest\n"
-        "  Cardio               — 20–25 min run (intervals or tempo; counts toward 5k goal)\n"
-        "  Full-body circuit    — Bench / rows / squats / press, 3×8 each, move fast\n"
-        "  Weak point           — arms, rear delts, calves tend to get dropped"
+        "  Missed muscle?    5–6 exercises, one area, minimal rest\n"
+        "  Cardio            20–25 min run (intervals or tempo)\n"
+        "  Full-body circuit Bench / rows / squats / press, 3×8, move fast\n"
+        "  Weak point        arms, rear delts, calves"
     ),
 }
 
@@ -117,10 +81,17 @@ _SESSION_PLANS: dict[str, str] = {
 _ROUTER_SYSTEM = """\
 Classify the user's gym message into exactly one action. Reply ONLY with valid JSON — no prose.
 
-{"action": "suggest"}                                          — wants a workout suggestion or next session
-{"action": "log"}                                              — logging a completed workout
-{"action": "history", "exercise": "<name or empty string>"}   — wants exercise history / progressive overload data
-{"action": "clarify", "question": "<one short question>"}     — intent unclear
+{"action": "suggest"}                                                      — wants a workout suggestion or next session
+{"action": "suggest", "override": "push|pull|legs|short"}                 — explicitly requests a specific session type
+{"action": "log"}                                                          — logging a completed workout
+{"action": "history", "exercise": "<name or empty string>"}               — wants exercise history / progressive overload data
+{"action": "clarify", "question": "<one short question>"}                 — intent unclear
+
+Override examples:
+  "give me pull day"     → {"action": "suggest", "override": "pull"}
+  "switch to legs"       → {"action": "suggest", "override": "legs"}
+  "I want to do push"   → {"action": "suggest", "override": "push"}
+  "short session today"  → {"action": "suggest", "override": "short"}
 """
 
 _LOG_PARSER_SYSTEM = """\
@@ -151,48 +122,44 @@ Rules:
 
 _AFFIRMATIVES = frozenset({
     "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "go", "done",
-    "ready", "yep", "absolutely", "let's go", "lets go",
+    "ready", "absolutely", "let's go", "lets go",
 })
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
 
 async def handle(conn: sqlite3.Connection, text: str, user_id: int = 0) -> str:
-    """Classify the user's gym message and dispatch to the appropriate function.
-
-    Checks for a pending session-offer state first — if Ollie said yes to
-    "want to log?", guide him toward sending the log. Otherwise normal routing.
-    """
+    """Classify the user's gym message and dispatch to the appropriate function."""
     pending = state_svc.get(user_id)
     if pending and pending.get("type") == "session_offered":
         state_svc.clear(user_id)
         words = set(text.lower().split())
         if words & _AFFIRMATIVES and len(text.split()) <= 5:
             return (
-                "Good session. Send me your lifts and I'll log them.\n"
-                "e.g. 'bench 80kg 5×5, OHP 52.5kg 4×8, dips BW 4×10'"
+                "Nice. Send the lifts — I'll log them.\n"
+                "e.g. bench 80kg 5×5, OHP 52.5kg 4×8, dips BW 4×10"
             )
-        # Not a yes — fall through to normal routing (might be a direct log)
 
     raw = await complete([{"role": "user", "content": text}], system=_ROUTER_SYSTEM)
 
     try:
         intent = json.loads(_extract_json(raw))
     except (json.JSONDecodeError, ValueError):
-        return "What do you need — a session plan, logging your lifts, or checking history?"
+        return "Session plan, log your lifts, or check history — what do you need?"
 
     action = intent.get("action")
 
     if action == "suggest":
-        return await _suggest_next_session(conn, user_id)
+        override = intent.get("override", "").strip().lower() or None
+        return await _suggest_next_session(conn, user_id, override_type=override)
     if action == "log":
         return await _log_workout(conn, text)
     if action == "history":
         exercise = intent.get("exercise", "").strip()
         return await _query_history(conn, exercise)
     if action == "clarify":
-        return intent.get("question", "What do you need — a session plan, logging your lifts, or checking history?")
-    return "What do you need — a session plan, logging your lifts, or checking history?"
+        return intent.get("question", "Session plan, log your lifts, or check history?")
+    return "Session plan, log your lifts, or check history?"
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
@@ -207,12 +174,34 @@ def get_next_session_type(conn: sqlite3.Connection) -> str:
     return "push"
 
 
-def _get_progression_hints(conn: sqlite3.Connection, session_type: str) -> list[str]:
-    """Pull last logged weight for key exercises and suggest +2.5kg or +1 rep.
+def _get_last_session_of_type(conn: sqlite3.Connection, session_type: str) -> dict | None:
+    """Return the most recent logged session matching session_type, or None."""
+    for session in get_recent_sessions(conn, limit=20):
+        if session.get("session_type") == session_type:
+            return session
+    return None
 
-    Returns a list of hint strings to prepend to the session plan. Empty list
-    if there's no history yet.
-    """
+
+def _format_last_session(session: dict) -> str:
+    """Format a past session as a compact one-line summary for display."""
+    try:
+        days_ago = (date.today() - date.fromisoformat(session["date"])).days
+        age = f"{days_ago}d ago" if days_ago > 0 else "today"
+    except (ValueError, KeyError):
+        age = session.get("date", "?")
+
+    sets = session.get("sets", [])
+    parts = []
+    for ex in sets[:6]:
+        weight = f"{ex['weight_kg']}kg" if ex.get("weight_kg") is not None else "BW"
+        parts.append(f"{ex['exercise'].title()} {weight} {ex['sets']}×{ex['reps']}")
+
+    exercises_str = ", ".join(parts) if parts else "no exercises recorded"
+    return f"Last {session['session_type']} ({age}): {exercises_str}"
+
+
+def _get_progression_hints(conn: sqlite3.Connection, session_type: str) -> list[str]:
+    """Pull last logged weight for key exercises and suggest +2.5kg or +1 rep."""
     hints = []
     for ex in _KEY_EXERCISES.get(session_type, []):
         rows = get_last_sets_for_exercise(conn, ex, limit=1)
@@ -224,34 +213,43 @@ def _get_progression_hints(conn: sqlite3.Connection, session_type: str) -> list[
         failed = any(w in notes for w in ("fail", "missed", "short", "couldn't", "only"))
 
         if weight is None:
-            # Bodyweight exercise — suggest +1 rep if last attempt was clean
             next_reps = r["reps"] if failed else r["reps"] + 1
             hints.append(
-                f"  {ex.title()}: last {r['date']} — BW {r['sets']}×{r['reps']} → aim for {r['sets']}×{next_reps} today"
+                f"  {ex.title()}: BW {r['sets']}×{r['reps']} last time ({r['date']}) → aim {r['sets']}×{next_reps} today"
             )
         else:
             next_weight = weight if failed else round((weight + 2.5) * 2) / 2
+            suffix = " (same weight — didn't nail it last time)" if failed else ""
             hints.append(
-                f"  {ex.title()}: last {r['date']} — {weight}kg {r['sets']}×{r['reps']} → try {next_weight}kg today"
+                f"  {ex.title()}: {weight}kg last time ({r['date']}) → try {next_weight}kg{suffix}"
             )
     return hints
 
 
-async def _suggest_next_session(conn: sqlite3.Connection, user_id: int = 0) -> str:
-    """Return the exercise plan for the next PPL session with progression hints."""
-    session_type = get_next_session_type(conn)
+async def _suggest_next_session(
+    conn: sqlite3.Connection,
+    user_id: int = 0,
+    override_type: str | None = None,
+) -> str:
+    """Return the exercise plan for the next PPL session with last-session recap + progression hints."""
+    session_type = override_type if override_type in (*_PPL_CYCLE, "short") else get_next_session_type(conn)
+
+    parts: list[str] = []
+
+    # Show the last logged session of this type at the top
+    last = _get_last_session_of_type(conn, session_type)
+    if last:
+        parts.append(_format_last_session(last))
+        parts.append("")
+
     hints = _get_progression_hints(conn, session_type)
-
-    parts = [f"{session_type.title()} day. Here's the plan:"]
-
     if hints:
-        parts.append("\nProgression targets:")
         parts.extend(hints)
+        parts.append("")
 
-    parts.append(f"\n{_SESSION_PLANS[session_type]}")
-    parts.append("\nSend your lifts when you're done and I'll log the session.")
+    parts.append(_SESSION_PLANS[session_type])
+    parts.append("\nSend the lifts when you're done.")
 
-    # Set state so a "yes" reply is routed back here rather than to classify()
     state_svc.set_state(user_id, {"type": "session_offered", "session_type": session_type})
 
     return "\n".join(parts)
@@ -264,17 +262,17 @@ async def _log_workout(conn: sqlite3.Connection, text: str) -> str:
     try:
         parsed = json.loads(_extract_json(raw))
     except (json.JSONDecodeError, ValueError):
-        return "Couldn't parse that. Try: 'bench 80kg 5×5, incline DB 30kg 4×8, dips 4×10'"
+        return "Couldn't parse that — try: bench 80kg 5×5, incline DB 30kg 4×8, dips 4×10"
 
     exercises = parsed.get("exercises", [])
     if not exercises:
-        return "No exercises found. Try: 'bench 80kg 5×5, OHP 50kg 4×8'"
+        return "No exercises found. Format: bench 80kg 5×5, OHP 50kg 4×8"
 
     session_type = parsed.get("session_type", "short")
     today = date.today().isoformat()
     session_id = insert_session(conn, GymSession(date=today, session_type=session_type))
 
-    lines = [f"Done — {session_type} logged ({today}):\n"]
+    lines = [f"{session_type.title()} session logged — {today}:\n"]
     for ex in exercises:
         weight = ex.get("weight_kg")
         warmup = ex.get("warmup_kg")
@@ -296,9 +294,10 @@ async def _log_workout(conn: sqlite3.Connection, text: str) -> str:
         warmup_str = f" (warmup {warmup}kg)" if warmup is not None else ""
         note_str = f"  {notes}" if notes else ""
         lines.append(
-            f"  {ex.get('exercise', 'unknown')}  {weight_str}{warmup_str}  {sets}×{reps}{note_str}"
+            f"  {ex.get('exercise', 'unknown').title()}  {weight_str}{warmup_str}  {sets}×{reps}{note_str}"
         )
 
+    lines.append("\nLogged to your session history.")
     return "\n".join(lines)
 
 
@@ -309,7 +308,7 @@ async def _query_history(conn: sqlite3.Connection, exercise: str) -> str:
 
     rows = get_last_sets_for_exercise(conn, exercise, limit=5)
     if not rows:
-        return f"No logged sets for '{exercise}' yet."
+        return f"Nothing logged for '{exercise}' yet."
 
     lines = [f"{exercise.title()} — last {len(rows)} session(s):"]
     for r in rows:

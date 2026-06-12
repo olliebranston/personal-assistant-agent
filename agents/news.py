@@ -24,12 +24,11 @@ _HORSE_DETAILS = {
 }
 
 _CHELSEA_SYSTEM = """\
-Summarise these Chelsea FC news items for Ollie into 3-5 concise bullet points.
-Include: transfers, signings, manager news, squad/injury updates, contract news, club developments.
-Exclude: live commentary, goal notifications, basic match reports unless they carry wider significance.
-Be direct and factual. No filler. No "according to sources" padding.
-Format: one bullet per item starting with •
-If nothing is genuinely newsworthy, reply with exactly one line:
+Summarise these Chelsea FC news items for Ollie. 3–5 bullets max.
+Cover: transfers, signings, manager news, injuries, contract news, club decisions.
+Skip: match commentary, goal notifications, anything a match report already covers.
+Tone: direct, no padding, no "according to sources". One bullet per item, starting with •.
+If nothing is actually newsworthy, reply with exactly:
 No significant Chelsea news in the last 48 hours.
 """
 

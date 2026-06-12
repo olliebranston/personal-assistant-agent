@@ -19,23 +19,120 @@ logger = logging.getLogger(__name__)
 _TZ = ZoneInfo("Europe/London")
 _UID = config.TELEGRAM_ALLOWED_USER_ID
 
-# ── Batch cook tips (Sunday job) ─────────────────────────────────────────────
+# ── Batch cook recipe cards (Sunday job) ─────────────────────────────────────
 
-_BATCH_COOK_TIPS = """\
-Batch cook order of operations (fastest first):
-  1. Start any lentils/grains — they need the most time, hands-off.
-  2. Prep veg while they cook (chop, season, roast at 200°C).
-  3. Press tofu / cook eggs / fry aromatics in parallel.
-  4. Make sauces/dressings while everything cools.
-  5. Portion into containers once cool — label with day.
-Goal: enough for 4–5 lunches + midweek dinners covered."""
+_RECIPES = {
+    "A": {
+        "name": "Red Lentil Dal",
+        "protein": "~35–47g (with tofu or yoghurt boost)",
+        "time": "30 mins",
+        "ingredients": (
+            "250g red lentils, 1 tin tomatoes, 1 tin coconut milk, "
+            "150g spinach, 1 onion, 4 garlic cloves, 2cm ginger, "
+            "1 tsp cumin, 1 tsp turmeric, 1 tsp garam masala, chilli to taste"
+        ),
+        "method": (
+            "1. Fry onion 5 mins, add garlic + ginger + spices, 2 mins.\n"
+            "2. Add lentils, tomatoes, coconut milk + 300ml water. Simmer 20 mins.\n"
+            "3. Stir in spinach until wilted. Season hard.\n"
+            "4. Portion into 4 containers. Add 150g baked tofu or dollop Greek yoghurt per portion."
+        ),
+    },
+    "B": {
+        "name": "Lentil & Baked Tofu Salad",
+        "protein": "~30–41g",
+        "time": "40 mins",
+        "ingredients": (
+            "250g puy lentils, 400g firm tofu, roasted red peppers (jar fine), "
+            "cucumber, cherry tomatoes, parsley, "
+            "dressing: 3 tbsp tahini, 2 tbsp lemon juice, 1 tbsp soy, water to loosen"
+        ),
+        "method": (
+            "1. Cook lentils 20 mins, drain, cool.\n"
+            "2. Cube tofu, toss in soy + sesame oil, roast 200°C 20 mins (crispy edges).\n"
+            "3. Chop veg, mix everything together.\n"
+            "4. Dress to coat. Portion into 4 containers. Hemp seeds on top optional (+6g protein)."
+        ),
+    },
+    "C": {
+        "name": "Tofu Egg Fried Rice",
+        "protein": "~28–33g",
+        "time": "25 mins",
+        "ingredients": (
+            "300g brown rice (dry), 400g firm tofu, 8 eggs, 200g edamame (frozen), "
+            "soy sauce, sesame oil, ginger, 4 spring onions, 2 garlic cloves, chilli"
+        ),
+        "method": (
+            "1. Cook rice, spread on tray to cool (stops clumping).\n"
+            "2. Crumble tofu into pan with oil, fry until golden. Set aside.\n"
+            "3. Scramble eggs in same pan, add cold rice, fry until separated.\n"
+            "4. Add edamame, tofu, soy + sesame oil, spring onions. Toss. Portion ×4."
+        ),
+    },
+    "D": {
+        "name": "Black Bean & Sweet Potato Stew",
+        "protein": "~32–46g (with tempeh or yoghurt)",
+        "time": "35 mins",
+        "ingredients": (
+            "2 tins black beans, 1 tin kidney beans, 2 sweet potatoes, "
+            "1 tin tomatoes, 1 tsp smoked paprika, 1 tsp cumin, 1 chipotle (or 1 tsp paste), "
+            "lime, coriander"
+        ),
+        "method": (
+            "1. Dice sweet potato, roast 200°C 20 mins.\n"
+            "2. Fry onion + spices 5 mins, add beans + tomatoes + 200ml water.\n"
+            "3. Simmer 15 mins, add sweet potato + lime juice.\n"
+            "4. Portion ×4. Serve with Greek yoghurt + hot sauce, or sliced tempeh on top."
+        ),
+    },
+    "E": {
+        "name": "Quinoa Power Bowl",
+        "protein": "~25–40g (with tofu or tempeh)",
+        "time": "35 mins",
+        "ingredients": (
+            "300g quinoa (dry), 1 tin chickpeas, mixed roast veg (whatever's in the fridge), "
+            "200g spinach, dressing: miso paste, tahini, rice vinegar, sesame oil, chilli flakes"
+        ),
+        "method": (
+            "1. Cook quinoa 15 mins, cool.\n"
+            "2. Roast veg + chickpeas at 200°C 25 mins (season well).\n"
+            "3. Wilt spinach in a pan with garlic.\n"
+            "4. Whisk dressing, assemble bowls. Add baked tofu or tempeh to push protein to 40g+."
+        ),
+    },
+}
+
+
+def _get_batch_cook_suggestion() -> str:
+    """Return this week's batch cook rotation with a full recipe card."""
+    idx = datetime.date.today().isocalendar()[1] % len(_RECIPES)
+    key = list(_RECIPES.keys())[idx]
+    r = _RECIPES[key]
+
+    lines = [
+        f"*Batch cook Sunday — Rotation {key}: {r['name']}*",
+        f"Protein: {r['protein']}  |  Time: {r['time']}",
+        "",
+        "*Ingredients (4 portions):*",
+        r["ingredients"],
+        "",
+        "*Method:*",
+        r["method"],
+        "",
+        "*Order of ops:*",
+        "  1. Start grains/lentils first — hands off while you prep veg.",
+        "  2. Roast tofu/veg simultaneously in the oven.",
+        "  3. Make sauces/dressings while things cool.",
+        "  4. Portion into containers, label with day.",
+    ]
+    return "\n".join(lines)
 
 
 # ── Job callbacks ─────────────────────────────────────────────────────────────
 
 
 async def _morning_briefing(context) -> None:
-    """7:30 AM daily: breakfast + next gym session + calorie note."""
+    """7:45 AM daily: breakfast suggestion + next gym session."""
     today = datetime.date.today()
     weekday = today.weekday()
 
@@ -50,19 +147,17 @@ async def _morning_briefing(context) -> None:
     day_name = today.strftime("%A")
     is_weekend = weekday >= 5
     cal_note = (
-        "Rest day target: 2,950 kcal"
+        "Rest day — 2,950 kcal target."
         if is_weekend
-        else "Training target: 3,300 kcal (if lifting today) or 2,950 (rest)"
+        else f"Gym day target: 3,300 kcal (if lifting). 2,950 if rest."
     )
 
     lines = [
-        f"Morning, Ollie. {day_name}.",
+        f"{day_name}.",
         "",
         f"Breakfast: {breakfast}",
         "",
-        f"Next gym session: {next_session.title()} day.",
-        cal_note,
-        "",
+        f"Next session: {next_session.title()} day. {cal_note}",
         "Protein target: 230g. Start strong.",
     ]
     await context.bot.send_message(chat_id=_UID, text="\n".join(lines))
@@ -84,14 +179,14 @@ async def _midmorning_checkin(context) -> None:
     await context.bot.send_message(
         chat_id=_UID,
         text=(
-            f"Mid-morning check: {logged:.0f}g protein logged so far.\n"
-            "Breakfast done? If not, get it in — 60g by 11 AM keeps the day on track."
+            f"Mid-morning: {logged:.0f}g protein logged.\n"
+            "Breakfast done? 60g by 11am keeps the day on track."
         ),
     )
 
 
-async def _evening_checkin(context) -> None:
-    """7:00 PM daily: prompt to log dinner."""
+async def _evening_dinner_prompt(context) -> None:
+    """9:00 PM daily: prompt to log dinner."""
     await context.bot.send_message(
         chat_id=_UID,
         text="Evening — what did you have for dinner? Send me the details and I'll log it.",
@@ -99,7 +194,7 @@ async def _evening_checkin(context) -> None:
 
 
 async def _end_of_day_summary(context) -> None:
-    """9:30 PM daily: full macro summary."""
+    """11:00 PM daily: full macro summary."""
     conn = get_connection()
     try:
         summary = meal_agent.daily_summary(conn)
@@ -113,28 +208,20 @@ async def _end_of_day_summary(context) -> None:
 
 
 async def _friday_shopping_list(context) -> None:
-    """4:00 PM Friday: week summary + shopping list prompt."""
+    """5:00 PM Friday: week summary + next week's shopping list."""
     conn = get_connection()
     try:
         summary = meal_agent.build_friday_summary(conn)
     finally:
         conn.close()
 
-    await context.bot.send_message(chat_id=_UID, text=summary)
+    await context.bot.send_message(chat_id=_UID, text=summary, parse_mode="Markdown")
 
 
 async def _sunday_batch_cook(context) -> None:
-    """10:00 AM Sunday: this week's lunch rotation + batch cook order of ops."""
-    rotation = meal_agent.get_lunch_rotation()
-
-    lines = [
-        "Batch cook Sunday. This week's lunch rotation:",
-        "",
-        rotation,
-        "",
-        _BATCH_COOK_TIPS,
-    ]
-    await context.bot.send_message(chat_id=_UID, text="\n".join(lines))
+    """10:00 AM Sunday: batch cook recipe card for this week's rotation."""
+    recipe_msg = _get_batch_cook_suggestion()
+    await context.bot.send_message(chat_id=_UID, text=recipe_msg, parse_mode="Markdown")
 
 
 # ── Registration ──────────────────────────────────────────────────────────────
@@ -146,7 +233,7 @@ def register_jobs(app: Application) -> None:
 
     jq.run_daily(
         _morning_briefing,
-        time=datetime.time(7, 30, tzinfo=_TZ),
+        time=datetime.time(7, 45, tzinfo=_TZ),
     )
     jq.run_daily(
         _midmorning_checkin,
@@ -154,16 +241,16 @@ def register_jobs(app: Application) -> None:
         days=(0, 1, 2, 3, 4),  # weekdays only
     )
     jq.run_daily(
-        _evening_checkin,
-        time=datetime.time(19, 0, tzinfo=_TZ),
+        _evening_dinner_prompt,
+        time=datetime.time(21, 0, tzinfo=_TZ),
     )
     jq.run_daily(
         _end_of_day_summary,
-        time=datetime.time(21, 30, tzinfo=_TZ),
+        time=datetime.time(23, 0, tzinfo=_TZ),
     )
     jq.run_daily(
         _friday_shopping_list,
-        time=datetime.time(16, 0, tzinfo=_TZ),
+        time=datetime.time(17, 0, tzinfo=_TZ),
         days=(4,),  # Friday
     )
     jq.run_daily(
@@ -172,4 +259,4 @@ def register_jobs(app: Application) -> None:
         days=(6,),  # Sunday
     )
 
-    logger.info("Scheduled jobs registered: morning, mid-morning, evening, EOD, Friday, Sunday")
+    logger.info("Scheduled jobs registered: morning 7:45, mid-morning 10:30, evening 21:00, EOD 23:00, Friday 17:00, Sunday 10:00")
