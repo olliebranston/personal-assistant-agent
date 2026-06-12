@@ -1,23 +1,26 @@
-"""News and sports data service: Chelsea FC RSS + horse racing news.
+"""News and sports data service.
 
 Data sources:
-- Chelsea FC: BBC Sport RSS (48-hour window, live match updates excluded)
-- Horses: Racing Post search (best-effort, Cloudflare may block) → Google News RSS fallback
+- Chelsea FC: BBC Sport RSS (48-hour window), Sky Sports fallback
+- Horse racing: The Racing API free tier — today/tomorrow racecards scanned for
+  Ollie's horses. Historical results require a Pro Plan upgrade.
 
-All results cached in memory for 1 hour to avoid hammering feeds.
+All results cached in memory for 1 hour.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from email.utils import parsedate_to_datetime
-from urllib.parse import quote_plus
 
 import feedparser
 import httpx
 from bs4 import BeautifulSoup
+
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -42,8 +45,8 @@ def _set_cache(key: str, value) -> None:
 
 BBC_CHELSEA_RSS = "https://feeds.bbci.co.uk/sport/football/chelsea/rss.xml"
 _SKY_CHELSEA_RSS = "https://www.skysports.com/rss/12040"
-_RACING_POST_SEARCH = "https://www.racingpost.com/horses/search/results/?q={}"
-_GOOGLE_NEWS_RSS = "https://news.google.com/rss/search?q={}&hl=en-GB&gl=GB&ceid=GB:en"
+
+_RACING_API_BASE = "https://api.theracingapi.com/v1"
 
 HORSES = [
     "DIAMOND BAY",
@@ -68,19 +71,16 @@ _HEADERS = {
     "Accept-Language": "en-GB,en;q=0.9",
 }
 
-# Title-level patterns that indicate live match commentary rather than news
 _LIVE_TITLE_PREFIXES = ("goal!", "half-time:", "full-time:", "live:", "ht:", "ft:")
-
-_CHELSEA_MAX_AGE_SEC = 48 * 3600  # 48 hours
+_CHELSEA_MAX_AGE_SEC = 48 * 3600
 
 
 # ── Chelsea FC ────────────────────────────────────────────────────────────────
 
 async def fetch_chelsea_items() -> list[dict]:
-    """BBC Sport Chelsea RSS → filtered list of news items from the last 48 hours.
+    """BBC Sport Chelsea RSS → filtered list from last 48 hours. Sky Sports fallback.
 
     Each item: {title, summary, published (epoch float), link}.
-    Returns [] if the feed is unreachable.
     """
     cached = _get_cache("chelsea")
     if cached is not None:
@@ -100,7 +100,7 @@ async def fetch_chelsea_items() -> list[dict]:
 
 
 async def _fetch_chelsea_from_url(url: str) -> list[dict]:
-    """Fetch and parse a Chelsea RSS feed URL. Returns list of items (may be empty)."""
+    """Fetch and parse one Chelsea RSS URL. Returns [] on any failure."""
     items: list[dict] = []
     try:
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
@@ -141,32 +141,116 @@ async def _fetch_chelsea_from_url(url: str) -> list[dict]:
     return items
 
 
-# ── Horse racing ──────────────────────────────────────────────────────────────
+# ── Horse racing — The Racing API (free tier) ─────────────────────────────────
 #
-# TODO: Replace the Racing Post / Google News approach below with The Racing API.
+# Free plan: /v1/racecards/free?day=today|tomorrow
+# Each racecard includes all runners with horse name, horse_id, jockey, form, going.
+# We scan every race for name matches against the HORSES list.
 #
-# Sign up at theracingapi.com/register for a free API key, then:
-#   1. Add RACING_API_KEY to config.py and .env
-#   2. Implement _lookup_horse_id(name, client) → str | None
-#      GET https://api.theracingapi.com/v1/horses/search?name={name}
-#      Auth: httpx.BasicAuth(RACING_API_KEY, "x")
-#   3. Implement fetch_horse_entries(horse_id, client) and fetch_horse_results(horse_id, client)
-#      GET /v1/entries?horse_id={id}&start_date={today}
-#      GET /v1/results?horse_id={id}&start_date={14d_ago}&end_date={today}
-#   4. Replace fetch_all_horse_items() with fetch_all_horse_data() that returns
-#      {horse_name: {entries: [...], results: [...]}} — no LLM summarisation needed.
-#   5. Update agents/news.py to format structured data directly (no _RACING_SYSTEM LLM call).
-#   6. Remove fetch_horse_items, _try_racing_post, _try_google_news and their constants below.
+# Not available on free plan:
+#   - Horse search by name (/v1/horses/search — Standard Plan)
+#   - Historical results (/v1/horses/{id}/results — Pro Plan)
 #
-# Horse IDs are stable — cache them permanently in a module-level dict with no TTL.
+# Upgrade path: theracingapi.com → Standard/Pro plan unlocks search + results.
+
+
+def _racing_auth() -> httpx.BasicAuth | None:
+    """Return BasicAuth for the Racing API, or None if credentials are not configured."""
+    if config.RACING_API_USERNAME and config.RACING_API_PASSWORD:
+        return httpx.BasicAuth(config.RACING_API_USERNAME, config.RACING_API_PASSWORD)
+    return None
+
+
+def _normalize_horse_name(name: str) -> str:
+    """Strip country code suffix and return uppercase. 'Diamond Bay (GB)' → 'DIAMOND BAY'."""
+    return re.sub(r"\s*\([^)]+\)\s*$", "", name).strip().upper()
+
+
+def _fmt_dist(dist_f_str: str) -> str:
+    """Convert furlongs to human-readable distance. '10.0' → '1m2f', '7.5' → '7.5f'."""
+    try:
+        f = float(dist_f_str)
+    except (ValueError, TypeError):
+        return ""
+    miles, rem = divmod(f, 8)
+    if miles == 0:
+        return f"{rem:g}f"
+    elif rem == 0:
+        return f"{int(miles)}m"
+    else:
+        return f"{int(miles)}m{rem:g}f"
+
+
+async def _fetch_racecard_entries(day: str, auth: httpx.BasicAuth) -> list[dict]:
+    """Fetch one day's racecards and return runners from our HORSES list."""
+    found = []
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{_RACING_API_BASE}/racecards/free",
+                params={"day": day},
+                auth=auth,
+            )
+            resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.warning("Racing API racecard fetch (%s) failed: %s", day, exc)
+        return found
+
+    for race in data.get("racecards", []):
+        for runner in race.get("runners", []):
+            normalized = _normalize_horse_name(runner.get("horse", ""))
+            if normalized in HORSES:
+                found.append({
+                    "horse_key": normalized,
+                    "horse": runner.get("horse", ""),
+                    "horse_id": runner.get("horse_id", ""),
+                    "day_label": day,
+                    "course": race.get("course", ""),
+                    "date": race.get("date", ""),
+                    "off_time": race.get("off_time", ""),
+                    "race_name": race.get("race_name", ""),
+                    "distance_f": race.get("distance_f", ""),
+                    "going": race.get("going", ""),
+                    "race_class": race.get("race_class", ""),
+                    "jockey": runner.get("jockey", ""),
+                    "form": runner.get("form", ""),
+                })
+    return found
+
 
 async def fetch_all_horse_items() -> dict[str, list[dict]]:
-    """Horse racing data is pending Racing API integration — returns empty dict.
+    """Scan today's and tomorrow's free racecards for our horses.
 
-    Google News RSS was removed because it produced hallucinated results
-    (wrong courses, wrong dates, fabricated race details). Racing Post is
-    Cloudflare-blocked in production.
-
-    See the TODO comment above for the Racing API implementation plan.
+    Returns {horse_key: [entry, ...]} — only horses with at least one entry.
+    Each entry has: horse, horse_id, day_label, course, date, off_time,
+    race_name, distance_f, going, race_class, jockey, form.
     """
-    return {}
+    cached = _get_cache("horse_entries")
+    if cached is not None:
+        return cached  # type: ignore[return-value]
+
+    result: dict[str, list[dict]] = {}
+
+    auth = _racing_auth()
+    if auth is None:
+        logger.warning("Racing API credentials not configured — skipping horse entries")
+        _set_cache("horse_entries", result)
+        return result
+
+    today_entries, tomorrow_entries = await asyncio.gather(
+        _fetch_racecard_entries("today", auth),
+        _fetch_racecard_entries("tomorrow", auth),
+    )
+
+    for entry in today_entries + tomorrow_entries:
+        key = entry["horse_key"]
+        result.setdefault(key, []).append(entry)
+
+    logger.info(
+        "Racing API: found %d entries for %d horse(s) across today/tomorrow",
+        sum(len(v) for v in result.values()),
+        len(result),
+    )
+    _set_cache("horse_entries", result)
+    return result

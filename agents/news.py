@@ -1,4 +1,4 @@
-"""News and sports agent: Chelsea FC news + horse owner updates."""
+"""News and sports agent: Chelsea FC news + horse owner race entries."""
 
 from __future__ import annotations
 
@@ -33,8 +33,46 @@ No significant Chelsea news in the last 48 hours.
 """
 
 
+def _format_horse_entries(horse_map: dict[str, list[dict]]) -> str:
+    """Format Racing API entry data as factual bullets — no LLM, nothing to hallucinate."""
+    if not horse_map:
+        return "No entries found for today or tomorrow."
+
+    lines = []
+    for horse_key, entries in horse_map.items():
+        display = horse_key.title()
+        for entry in entries:
+            day = entry.get("day_label", entry.get("date", ""))
+            course = entry.get("course", "")
+            off = entry.get("off_time", "")
+            dist = news_svc._fmt_dist(entry.get("distance_f", ""))
+            going = entry.get("going", "")
+            race_class = entry.get("race_class", "")
+            jockey = entry.get("jockey", "")
+            form = entry.get("form", "")
+
+            parts = [f"{course} {day}"]
+            if off:
+                parts.append(f"off {off}")
+            if dist:
+                parts.append(dist)
+            if going:
+                parts.append(going)
+            if race_class:
+                parts.append(race_class)
+
+            line = f"• {display} — {', '.join(parts)}"
+            if jockey:
+                line += f" ({jockey})"
+            if form:
+                line += f" — form: {form}"
+            lines.append(line)
+
+    return "\n".join(lines)
+
+
 async def handle(text: str, user_id: int = 0) -> str:
-    """Fetch Chelsea and horse racing news, return formatted Telegram response."""
+    """Fetch Chelsea news and horse racing entries, return formatted Telegram response."""
     chelsea_items, horse_map = await asyncio.gather(
         news_svc.fetch_chelsea_items(),
         news_svc.fetch_all_horse_items(),
@@ -61,10 +99,9 @@ async def handle(text: str, user_id: int = 0) -> str:
         sections.append("*Chelsea FC*\nNo news in the last 48 hours.")
 
     # ── Horses ─────────────────────────────────────────────────────────────────
-    # Google News RSS removed (hallucinated results). Racing API integration pending.
-    sections.append(
-        "*Your horses*\nNo verified data available — Racing API integration coming. "
-        "Sign up at theracingapi.com and share the key to enable this."
-    )
+    # Structured data only — no LLM, no hallucinations.
+    # Free plan covers today + tomorrow racecards. Historical results need Pro plan.
+    horse_section = _format_horse_entries(horse_map)
+    sections.append(f"*Your horses (today & tomorrow)*\n{horse_section}")
 
     return "\n\n".join(sections)
