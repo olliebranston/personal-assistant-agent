@@ -182,19 +182,33 @@ def _fmt_dist(dist_f_str: str) -> str:
 
 
 async def _fetch_racecard_entries(day: str, auth: httpx.BasicAuth) -> list[dict]:
-    """Fetch one day's racecards and return runners from our HORSES list."""
+    """Fetch one day's racecards and return runners from our HORSES list.
+
+    Retries once on 429 (rate limit) after a 2-second pause.
+    """
     found = []
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(
-                f"{_RACING_API_BASE}/racecards/free",
-                params={"day": day},
-                auth=auth,
-            )
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(
+                    f"{_RACING_API_BASE}/racecards/free",
+                    params={"day": day},
+                    auth=auth,
+                )
+            if resp.status_code == 429:
+                if attempt == 0:
+                    logger.debug("Racing API rate limited on %s — retrying in 2s", day)
+                    await asyncio.sleep(2)
+                    continue
+                logger.warning("Racing API rate limited on %s after retry", day)
+                return found
             resp.raise_for_status()
-        data = resp.json()
-    except Exception as exc:
-        logger.warning("Racing API racecard fetch (%s) failed: %s", day, exc)
+            data = resp.json()
+            break
+        except Exception as exc:
+            logger.warning("Racing API racecard fetch (%s) failed: %s", day, exc)
+            return found
+    else:
         return found
 
     for race in data.get("racecards", []):
@@ -238,10 +252,10 @@ async def fetch_all_horse_items() -> dict[str, list[dict]]:
         _set_cache("horse_entries", result)
         return result
 
-    today_entries, tomorrow_entries = await asyncio.gather(
-        _fetch_racecard_entries("today", auth),
-        _fetch_racecard_entries("tomorrow", auth),
-    )
+    # Sequential — free plan is rate-limited to 1 req/s
+    today_entries = await _fetch_racecard_entries("today", auth)
+    await asyncio.sleep(1.1)
+    tomorrow_entries = await _fetch_racecard_entries("tomorrow", auth)
 
     for entry in today_entries + tomorrow_entries:
         key = entry["horse_key"]
