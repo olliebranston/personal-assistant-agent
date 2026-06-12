@@ -1,6 +1,9 @@
 """Entry point. Initialises the database, registers handlers, and starts polling."""
 
 import logging
+import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from telegram import Update
 from telegram.constants import ChatAction
@@ -26,6 +29,8 @@ logging.basicConfig(
 log_scrubber.install()
 logger = logging.getLogger(__name__)
 
+_TZ = ZoneInfo("Europe/London")
+
 _GENERAL_SYSTEM = (
     "You are Robin — Ollie's personal assistant. "
     "Talk like a sharp, switched-on friend who knows training, nutrition, scheduling, and sports inside out. "
@@ -34,6 +39,58 @@ _GENERAL_SYSTEM = (
     "Answer what's asked. One or two sentences is usually enough. "
     "Use conversation history to understand follow-ups without asking Ollie to repeat himself."
 )
+
+_REMINDER_SYSTEM = """\
+Extract the reminder from the user's message. Reply ONLY with valid JSON — no prose.
+
+Current London time: {now}
+
+{{"text": "<what to remind about>", "datetime": "<ISO 8601 datetime, e.g. 2026-06-13T14:00:00>"}}
+
+Rules:
+- "in 2 hours" → now + 2 hours
+- "tomorrow morning" → tomorrow at 08:00
+- "at 3pm" → today at 15:00 (or tomorrow if 3pm has passed)
+- "tomorrow at X" → tomorrow at X
+- text should be concise: "call dentist", "check the laundry", "take medication"
+"""
+
+
+async def _set_reminder(update: Update, context, text: str) -> str:
+    """Parse a reminder request and schedule a one-off job."""
+    now = datetime.now(tz=_TZ)
+    system = _REMINDER_SYSTEM.format(now=now.isoformat())
+
+    raw = await complete([{"role": "user", "content": text}], system=system)
+
+    try:
+        import json
+        parsed = json.loads(re.search(r"\{.*\}", raw, re.DOTALL).group())
+        reminder_text = parsed["text"]
+        reminder_dt = datetime.fromisoformat(parsed["datetime"])
+        if reminder_dt.tzinfo is None:
+            reminder_dt = reminder_dt.replace(tzinfo=_TZ)
+    except Exception as exc:
+        logger.warning("Reminder parse failed: %s — raw: %s", exc, raw)
+        return "Couldn't parse that reminder. Try: 'remind me at 3pm to call the dentist'"
+
+    if reminder_dt <= now:
+        return "That time has already passed. Give me a future time."
+
+    delay = (reminder_dt - now).total_seconds()
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    async def _fire_reminder(ctx):
+        await ctx.bot.send_message(chat_id=chat_id, text=f"Reminder: {reminder_text}")
+
+    context.job_queue.run_once(_fire_reminder, when=delay)
+
+    time_str = reminder_dt.strftime("%H:%M")
+    date_str = reminder_dt.strftime("%a %d %b")
+    today_str = now.strftime("%a %d %b")
+    when_str = f"today at {time_str}" if date_str == today_str else f"{date_str} at {time_str}"
+    return f"Reminder set for {when_str} — '{reminder_text}'."
 
 
 async def _general_response(user_id: int, text: str) -> str:
@@ -91,6 +148,9 @@ async def route_message(update: Update, context) -> None:
     elif domain == "news":
         set_last_domain(user_id, "news")
         await news_handler.handle(update, context)
+    elif domain == "reminder":
+        response = await _set_reminder(update, context, text)
+        await update.message.reply_text(response)
     else:
         response = await _general_response(user_id, text)
         await update.message.reply_text(response)

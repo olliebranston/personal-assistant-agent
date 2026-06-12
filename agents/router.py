@@ -13,11 +13,13 @@ Classify the user's message into one domain. Reply ONLY with valid JSON — no p
 
 {"domain": "gym"}      — workouts, exercises, lifting, running, sessions, training, bench, squat, OHP, pull day, push day, legs
 {"domain": "meal"}     — food, eating, logging meals, macros, protein, calories, nutrition, recipes, shopping,
-                         corrections to food already logged, anything about what was eaten or how much protein
-{"domain": "calendar"} — events, schedule, appointments, meetings, reminders, dates, times, bookings.
+                         corrections to food already logged, anything about what was eaten or how much protein,
+                         body weight logging ("I weigh X", "weighed X"), meal planning, shopping lists
+{"domain": "calendar"} — events, schedule, appointments, meetings, dates, times, bookings.
                          Also classify here if the message reads like a forwarded event invite or plan,
                          e.g. "everyone meeting at The Anchor Thursday 8pm" or "match day Saturday 3pm kick-off"
-{"domain": "news"}     — news, football, Chelsea, horse racing, sports results, transfers
+{"domain": "news"}     — news, football, Chelsea, horse racing, sports results, transfers, world news, headlines
+{"domain": "reminder"} — setting a reminder or alert for a specific time (e.g. "remind me at 3pm", "message me tomorrow morning", "alert me in 2 hours")
 {"domain": "unknown"}  — anything that doesn't fit the above
 
 Tricky cases — classify these correctly:

@@ -1,4 +1,4 @@
-"""News and sports agent: Chelsea FC news + horse owner race entries."""
+"""News and sports agent: Chelsea FC, world news, horse race entries, calendar context."""
 
 from __future__ import annotations
 
@@ -24,12 +24,21 @@ _HORSE_DETAILS = {
 }
 
 _CHELSEA_SYSTEM = """\
-Summarise these Chelsea FC news items for Ollie. 3–5 bullets max.
+Summarise these Chelsea FC news items for Ollie. 3-5 bullets max.
 Cover: transfers, signings, manager news, injuries, contract news, club decisions.
 Skip: match commentary, goal notifications, anything a match report already covers.
-Tone: direct, no padding, no "according to sources". One bullet per item, starting with •.
+Tone: direct, no padding, no "according to sources". One bullet per item, starting with bullet.
 If nothing is actually newsworthy, reply with exactly:
 No significant Chelsea news in the last 48 hours.
+"""
+
+_WORLD_SYSTEM = """\
+Summarise these BBC World news headlines for Ollie into 3-4 concise bullets.
+Cover the most significant geopolitical stories only — wars, elections, major diplomatic events, economic shocks.
+Skip: celebrity, lifestyle, sport, anything trivial.
+Tone: sharp and factual. One bullet per story, starting with bullet.
+If nothing significant, reply with exactly:
+No major world stories in the last 24 hours.
 """
 
 
@@ -40,6 +49,8 @@ def _format_horse_entries(horse_map: dict[str, list[dict]]) -> str:
 
     lines = []
     for horse_key, entries in horse_map.items():
+        if horse_key.startswith("_"):
+            continue
         display = horse_key.title()
         for entry in entries:
             day = entry.get("day_label", entry.get("date", ""))
@@ -68,14 +79,35 @@ def _format_horse_entries(horse_map: dict[str, list[dict]]) -> str:
                 line += f" — form: {form}"
             lines.append(line)
 
-    return "\n".join(lines)
+    return "\n".join(lines) if lines else "No entries found for today or tomorrow."
+
+
+def _get_today_calendar_summary() -> str | None:
+    """Return a one-line summary of today's calendar events, or None on failure."""
+    try:
+        import datetime
+        from zoneinfo import ZoneInfo
+        from services.google_calendar import get_service, list_events
+        _TZ = ZoneInfo("Europe/London")
+        now = datetime.datetime.now(tz=_TZ)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        today_end = now.replace(hour=23, minute=59, second=59, microsecond=0).isoformat()
+        service = get_service()
+        events = list_events(service, today_start, today_end)
+        if not events:
+            return None
+        summaries = [ev["summary"] for ev in events[:3]]
+        return "Today: " + " · ".join(summaries)
+    except Exception:
+        return None
 
 
 async def handle(text: str, user_id: int = 0) -> str:
-    """Fetch Chelsea news and horse racing entries, return formatted Telegram response."""
-    chelsea_items, horse_map = await asyncio.gather(
+    """Fetch all news sources and return a formatted Telegram response."""
+    chelsea_items, horse_map, world_items = await asyncio.gather(
         news_svc.fetch_chelsea_items(),
         news_svc.fetch_all_horse_items(),
+        news_svc.fetch_world_news_items(),
     )
 
     sections: list[str] = []
@@ -98,16 +130,35 @@ async def handle(text: str, user_id: int = 0) -> str:
     else:
         sections.append("*Chelsea FC*\nNo news in the last 48 hours.")
 
+    # ── World news ─────────────────────────────────────────────────────────────
+    if world_items:
+        raw = "\n".join(
+            f"• {item['title']}: {item['summary']}"
+            for item in world_items[:6]
+        )
+        try:
+            world_out = await complete(
+                [{"role": "user", "content": raw}],
+                system=_WORLD_SYSTEM,
+            )
+            sections.append(f"*World*\n{world_out.strip()}")
+        except Exception as exc:
+            logger.error("[news] World LLM call failed: %s", exc)
+    else:
+        sections.append("*World*\nNo major stories in the last 24 hours.")
+
     # ── Horses ─────────────────────────────────────────────────────────────────
-    # Structured data only — no LLM, no hallucinations.
-    # Free plan covers today + tomorrow racecards. Historical results need Pro plan.
     if horse_map.get("_rate_limited"):
         sections.append(
-            "*Your horses*\nRace data unavailable — API quota reached for today. "
-            "Resets at midnight. Try again tomorrow."
+            "*Your horses*\nRace data unavailable — API quota reached. Resets at midnight."
         )
     else:
         horse_section = _format_horse_entries(horse_map)
         sections.append(f"*Your horses (today & tomorrow)*\n{horse_section}")
+
+    # ── Calendar context ───────────────────────────────────────────────────────
+    cal = _get_today_calendar_summary()
+    if cal:
+        sections.append(f"_{cal}_")
 
     return "\n\n".join(sections)

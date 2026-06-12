@@ -45,6 +45,7 @@ def _set_cache(key: str, value) -> None:
 
 BBC_CHELSEA_RSS = "https://feeds.bbci.co.uk/sport/football/chelsea/rss.xml"
 _SKY_CHELSEA_RSS = "https://www.skysports.com/rss/12040"
+BBC_WORLD_RSS = "https://feeds.bbci.co.uk/news/world/rss.xml"
 
 _RACING_API_BASE = "https://api.theracingapi.com/v1"
 
@@ -138,6 +139,56 @@ async def _fetch_chelsea_from_url(url: str) -> list[dict]:
     except Exception as exc:
         logger.warning("Chelsea RSS fetch failed (%s): %s", url, exc)
 
+    return items
+
+
+# ── World news ───────────────────────────────────────────────────────────────
+
+_WORLD_MAX_AGE_SEC = 24 * 3600  # 24 hours
+
+
+async def fetch_world_news_items() -> list[dict]:
+    """BBC World RSS → filtered list of top stories from the last 24 hours.
+
+    Each item: {title, summary, published (epoch float), link}.
+    Returns [] if the feed is unreachable or empty.
+    """
+    cached = _get_cache("world_news")
+    if cached is not None:
+        return cached  # type: ignore[return-value]
+
+    items: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            resp = await client.get(BBC_WORLD_RSS, headers=_HEADERS)
+            resp.raise_for_status()
+        feed = feedparser.parse(resp.content)
+        logger.debug("World RSS: bozo=%s entries=%d", feed.bozo, len(feed.entries))
+        now = time.time()
+
+        for entry in feed.entries[:10]:  # cap at 10 before age filter
+            published: float = now
+            try:
+                pub_str = entry.get("published") or ""
+                if pub_str:
+                    published = parsedate_to_datetime(pub_str).timestamp()
+            except Exception:
+                pass
+
+            if now - published > _WORLD_MAX_AGE_SEC:
+                continue
+
+            summary = BeautifulSoup(entry.get("summary", ""), "html.parser").get_text()
+            items.append({
+                "title": entry.get("title", ""),
+                "summary": summary,
+                "published": published,
+                "link": entry.get("link", ""),
+            })
+    except Exception as exc:
+        logger.warning("World news RSS fetch failed: %s", exc)
+
+    _set_cache("world_news", items)
     return items
 
 
