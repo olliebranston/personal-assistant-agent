@@ -284,7 +284,14 @@ def _write_and_confirm(conn: sqlite3.Connection, enriched: list[dict], meal_slot
     cal_target = _get_calorie_target(conn)
     protein_remaining = max(PROTEIN_TARGET_G - totals["protein_g"], 0)
 
-    lines = [f"Logged — {total_protein:.0f}g protein, {total_kcal:.0f} kcal."]
+    lines = ["Logged:"]
+    for item in enriched:
+        flag = _source_flag(item["source"])
+        lines.append(
+            f"  {item['quantity_g']}g {item['name']} — "
+            f"{item['protein_g']}g protein, {item['kcal']:.0f} kcal{flag}"
+        )
+    lines.append(f"\nTotal: {total_protein:.0f}g protein, {total_kcal:.0f} kcal")
     lines.append(f"Today: {totals['protein_g']:.0f}g protein / {totals['kcal']:.0f} kcal (target: {cal_target} kcal)")
     if protein_remaining > 40:
         lines.append(f"{protein_remaining:.0f}g protein to go — pre-bed shake covers most of it.")
@@ -292,6 +299,7 @@ def _write_and_confirm(conn: sqlite3.Connection, enriched: list[dict], meal_slot
         lines.append(f"Just {protein_remaining:.0f}g protein left.")
     else:
         lines.append("Protein target hit.")
+    lines.append("Wrong? Say 'correct it' or e.g. 'change the chicken to 62g protein'.")
     return "\n".join(lines)
 
 
