@@ -57,6 +57,12 @@ async def complete(
                 model=config.OPENROUTER_MODEL,
                 messages=full_messages,
             )
+            if not response.choices:
+                raise openai.APIError(
+                    f"OpenRouter returned empty choices (model: {config.OPENROUTER_MODEL})",
+                    response=response,
+                    body=None,
+                )
             return response.choices[0].message.content
         except openai.APIError as exc:
             last_exc = exc
