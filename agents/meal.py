@@ -1,22 +1,34 @@
-"""Meal planning agent: food logging, macro tracking, and meal suggestions."""
+"""Meal planning agent: food logging, macro tracking, meal suggestions, recipes, weight."""
 
 from __future__ import annotations
 
 import json
+import random
 import re
 import sqlite3
 from datetime import date, timedelta
 
 import services.state as state_svc
+from data.recipes import (
+    PANTRY_STAPLES,
+    RECIPES,
+    find_recipe,
+    format_recipe,
+    get_recipes_by_category,
+)
 from services.nutrition import lookup_macros
 from services.openrouter import complete
 from storage.models import (
     FoodLog,
     get_daily_totals,
     get_food_logs_for_date,
+    get_recent_recipe_slugs,
     get_recent_sessions,
     get_week_logs,
     insert_food_log,
+    insert_meal_plan,
+    log_weight,
+    get_weight_history,
     update_food_log,
 )
 
@@ -76,19 +88,23 @@ _ROUTER_SYSTEM = """\
 Classify the user's meal/nutrition message. Reply ONLY with valid JSON — no prose.
 
 {"action": "log"}                           — logging food eaten
-{"action": "correct"}                       — correcting a previously logged item (e.g. "actually that was 300g", "add 15g protein", "make it 200g")
+{"action": "correct"}                       — correcting a previously logged item
 {"action": "summary"}                       — wants today's macro totals
 {"action": "remaining"}                     — wants to know protein/kcal left today
-{"action": "history"}                       — asking about food logged yesterday or a specific recent day
-{"action": "week"}                          — asking about this week's nutrition (e.g. "how did I do this week", "weekly summary", "how's my protein this week")
-{"action": "suggest", "meal": "breakfast|lunch|dinner|snack"}  — wants a meal suggestion
+{"action": "history"}                       — asking about food logged yesterday or a specific day
+{"action": "week"}                          — asking about this week's nutrition
+{"action": "weight"}                        — logging or querying body weight (e.g. "I weighed 104.2kg", "how's my weight going")
+{"action": "recipe"}                        — wants a recipe, ingredients or method for a meal (e.g. "give me the recipe for miso salmon", "how do I make pad thai", "ingredients for dal")
+{"action": "week_plan"}                     — wants a weekly meal plan + shopping list (e.g. "plan my week", "what am I cooking this week", "generate a meal plan")
+{"action": "suggest", "meal": "breakfast|lunch|dinner|snack"}  — wants a single meal suggestion
 {"action": "clarify", "question": "<one short question>"}      — intent unclear
 
 Key distinctions:
-- "actually", "change", "make it", "should be" with a food → correct
-- "what did I eat", "yesterday", "last night" → history
-- "this week", "how did I do", "weekly" → week
-- A standalone number like "300g" after a food log → could be correct
+- "recipe", "how do I make", "ingredients for" → recipe
+- "plan my week", "meal plan", "shopping list" → week_plan
+- "I weigh", "weighed", "my weight" → weight
+- "actually", "change", "make it" with a food → correct
+- "what did I eat", "yesterday" → history
 """
 
 _FOOD_PARSER_SYSTEM = """\
@@ -170,6 +186,12 @@ async def handle(conn: sqlite3.Connection, text: str, user_id: int = 0) -> str:
         return _history_summary(conn)
     if action == "week":
         return _week_summary(conn)
+    if action == "weight":
+        return await _handle_weight(conn, text)
+    if action == "recipe":
+        return await _get_recipe(text)
+    if action == "week_plan":
+        return _generate_week_plan(conn)
     if action == "suggest":
         meal = intent.get("meal", "")
         return _suggest_meal(meal)
@@ -501,10 +523,234 @@ def _get_calorie_target(conn: sqlite3.Connection) -> int:
 
 def _source_flag(source: str) -> str:
     if source == "estimated":
-        return " ⚠️ no match — check manually"
+        return " no match — check manually"
     if source == "reference":
         return " (ref values)"
     return ""
+
+
+# ── Recipe lookup ──────────────────────────────────────────────────────────────
+
+_RECIPE_EXTRACT_SYSTEM = """\
+Extract the meal name the user is asking about. Reply ONLY with a short meal name — no prose.
+Examples: "give me the recipe for miso salmon" → "miso salmon"
+          "how do I make pad thai" → "pad thai"
+          "ingredients for red lentil dal" → "red lentil dal"
+"""
+
+
+async def _get_recipe(text: str) -> str:
+    """Find and format a recipe matching the user's request."""
+    raw = await complete([{"role": "user", "content": text}], system=_RECIPE_EXTRACT_SYSTEM)
+    query = raw.strip().strip('"').strip("'")
+
+    result = find_recipe(query)
+    if result:
+        slug, _ = result
+        return format_recipe(slug)
+
+    # No match — suggest closest categories
+    weekday = [r["name"] for _, r in get_recipes_by_category("weekday_dinner")]
+    weekend = [r["name"] for _, r in get_recipes_by_category("weekend_dinner")]
+    return (
+        f"Don't have a recipe for '{query}'. Here's what I've got:\n\n"
+        f"Weekday dinners: {', '.join(weekday)}\n"
+        f"Weekend dinners: {', '.join(weekend)}"
+    )
+
+
+# ── Weight logging ─────────────────────────────────────────────────────────────
+
+_WEIGHT_EXTRACT_SYSTEM = """\
+Extract the body weight in kg from the user's message. Reply ONLY with a number — no units, no prose.
+"I weighed 104.2kg this morning" → 104.2
+"104.5" → 104.5
+"weighed 103.8 today" → 103.8
+If the message is a query (not a log), reply with exactly: query
+"""
+
+
+async def _handle_weight(conn: sqlite3.Connection, text: str) -> str:
+    """Log body weight or return trend."""
+    raw = await complete([{"role": "user", "content": text}], system=_WEIGHT_EXTRACT_SYSTEM)
+    raw = raw.strip()
+
+    if raw == "query":
+        return _weight_trend(conn)
+
+    try:
+        kg = float(raw)
+    except ValueError:
+        return "Couldn't parse that weight. Try: '104.2kg' or '104.2 this morning'"
+
+    if not (50 <= kg <= 250):
+        return f"That doesn't look right ({kg}kg). Try again."
+
+    today = date.today().isoformat()
+    log_weight(conn, today, kg)
+    return f"Weight logged: {kg}kg.\n{_weight_trend(conn)}"
+
+
+def _weight_trend(conn: sqlite3.Connection) -> str:
+    """Return a concise weight trend from recent history."""
+    history = get_weight_history(conn, limit=8)
+    if not history:
+        return "No weight logged yet."
+
+    latest = history[0]
+    lines = [f"Latest: {latest['weight_kg']}kg ({latest['date']})"]
+
+    if len(history) >= 2:
+        oldest = history[-1]
+        delta = latest["weight_kg"] - oldest["weight_kg"]
+        direction = "down" if delta < 0 else "up"
+        lines.append(f"{direction} {abs(delta):.1f}kg over {len(history)} readings")
+
+    if len(history) >= 3:
+        lines.append("Recent: " + " → ".join(
+            f"{h['weight_kg']}kg" for h in reversed(history[:4])
+        ))
+
+    return "\n".join(lines)
+
+
+# ── Week meal plan + shopping list ────────────────────────────────────────────
+
+# Day slots for the week plan
+_WEEK_SLOTS = [
+    ("fri_dinner",  "Fri dinner"),
+    ("sat_dinner",  "Sat dinner"),
+    ("sun_dinner",  "Sun dinner"),
+    ("mon_dinner",  "Mon dinner"),
+    ("mon_lunch",   "Mon–Thu lunch (batch cook)"),
+]
+
+# Categories eligible for the 4 dinner slots
+_DINNER_CATEGORIES = ("weekday_dinner", "weekend_dinner")
+
+
+def _generate_week_plan(conn: sqlite3.Connection) -> str:
+    """Generate a weekly meal plan + shopping list and store it in the DB."""
+    today = date.today()
+    week_start = (today - timedelta(days=today.weekday())).isoformat()
+
+    # Get recently used recipes to avoid repetition
+    recent_slugs = set(get_recent_recipe_slugs(conn, weeks=2))
+
+    # Pick this week's batch cook rotation (existing logic)
+    batch_idx = today.isocalendar()[1] % 5
+    batch_categories = ["red_lentil_dal", "lentil_tofu_salad", "tofu_egg_fried_rice",
+                        "black_bean_sweet_potato_stew", "quinoa_power_bowl"]
+    batch_slug = batch_categories[batch_idx]
+
+    # Pick 4 dinners avoiding recent repeats
+    all_dinners = [
+        (slug, r) for slug, r in RECIPES.items()
+        if r.get("category") in _DINNER_CATEGORIES and slug not in recent_slugs
+    ]
+    if len(all_dinners) < 4:
+        # If not enough fresh options, open it up
+        all_dinners = [(slug, r) for slug, r in RECIPES.items()
+                       if r.get("category") in _DINNER_CATEGORIES]
+
+    chosen_dinners = random.sample(all_dinners, min(4, len(all_dinners)))
+    dinner_slots = ["fri_dinner", "sat_dinner", "sun_dinner", "mon_dinner"]
+
+    # Store plan in DB
+    conn.execute("DELETE FROM meal_plans WHERE week_start = ?", (week_start,))
+    conn.commit()
+    insert_meal_plan(conn, week_start, "batch_lunch", batch_slug)
+    for slot, (slug, _) in zip(dinner_slots, chosen_dinners):
+        insert_meal_plan(conn, week_start, slot, slug)
+
+    # Build output
+    batch_recipe = RECIPES[batch_slug]
+    lines = ["*THIS WEEK'S MEAL PLAN*", ""]
+    lines.append(f"LUNCHES (Mon–Thu batch cook)")
+    lines.append(f"• {batch_recipe['name']} — {batch_recipe['protein_g']}g protein, {batch_recipe['time_mins']} mins for 4 portions")
+    lines.append("")
+    lines.append("DINNERS")
+    slot_labels = {"fri_dinner": "Friday", "sat_dinner": "Saturday",
+                   "sun_dinner": "Sunday", "mon_dinner": "Monday"}
+    all_plan_recipes = [(batch_slug, batch_recipe)]
+    for slot, (slug, r) in zip(dinner_slots, chosen_dinners):
+        lines.append(f"• {slot_labels[slot]}: {r['name']} ({r['protein_g']}g protein)")
+        all_plan_recipes.append((slug, r))
+
+    # Generate shopping list
+    lines.append("")
+    lines.append("*SHOPPING LIST*")
+    shopping = _derive_shopping_list(all_plan_recipes)
+    for category, items in shopping.items():
+        if items:
+            lines.append(f"\n{category}")
+            for item, qty_str in items:
+                lines.append(f"• {item}: {qty_str}")
+
+    lines.append("")
+    lines.append("_Say 'swap Friday dinner for X' to change a slot._")
+    return "\n".join(lines)
+
+
+def _derive_shopping_list(
+    plan_recipes: list[tuple[str, dict]],
+) -> dict[str, list[tuple[str, str]]]:
+    """Aggregate ingredients across all planned recipes, grouped by category."""
+    # Accumulate raw ingredient quantities
+    accumulated: dict[str, list[str]] = {}
+
+    for slug, recipe in plan_recipes:
+        serves = recipe.get("serves", 1)
+        for ing in recipe.get("ingredients", []):
+            item = ing["item"].lower()
+            # Skip pantry staples
+            if any(staple in item for staple in PANTRY_STAPLES):
+                continue
+            qty = ing["qty"]
+            unit = ing.get("unit", "")
+            # Scale batch cook (4 serves already)
+            qty_str = f"{qty:g} {unit}".strip() if unit else f"{qty:g}"
+            if item not in accumulated:
+                accumulated[item] = []
+            accumulated[item].append(qty_str)
+
+    # Categorise
+    protein_keywords = {"salmon", "cod", "mackerel", "prawn", "scallop", "tofu",
+                        "tempeh", "egg", "chicken", "whey", "protein"}
+    dairy_keywords = {"yoghurt", "yogurt", "feta", "cream", "butter", "milk", "cheese"}
+    veg_keywords = {"spinach", "pepper", "courgette", "tomato", "onion", "leek",
+                    "spring onion", "bok choi", "cucumber", "avocado", "sweet potato",
+                    "carrot", "potato", "broccoli", "mushroom", "lemon", "lime",
+                    "coriander", "parsley", "dill", "mint", "chive", "shallot",
+                    "lemongrass", "banana", "berry", "berries"}
+    pantry_extra = {"noodle", "rice", "bread", "sourdough", "naan", "muffin",
+                    "panko", "flour", "roux", "lentil", "bean", "chickpea",
+                    "coconut milk", "honey", "peanut", "tahini", "hemp"}
+
+    categories: dict[str, list[tuple[str, str]]] = {
+        "PROTEIN & FISH": [],
+        "VEG & FRESH": [],
+        "DAIRY": [],
+        "FRIDGE / FREEZER": [],
+        "STORE CUPBOARD": [],
+    }
+
+    for item, qtys in sorted(accumulated.items()):
+        qty_display = " + ".join(dict.fromkeys(qtys))  # dedupe while preserving order
+        entry = (item, qty_display)
+
+        if any(kw in item for kw in protein_keywords):
+            categories["PROTEIN & FISH"].append(entry)
+        elif any(kw in item for kw in dairy_keywords):
+            categories["DAIRY"].append(entry)
+        elif any(kw in item for kw in veg_keywords):
+            categories["VEG & FRESH"].append(entry)
+        elif any(kw in item for kw in pantry_extra):
+            categories["STORE CUPBOARD"].append(entry)
+        else:
+            categories["FRIDGE / FREEZER"].append(entry)
+
+    return categories
 
 
 def _extract_json(text: str) -> str:
@@ -529,47 +775,46 @@ def get_lunch_rotation() -> str:
 
 
 def build_friday_summary(conn: sqlite3.Connection) -> str:
-    """Generate the Friday week summary + shopping list. Called by the scheduler."""
+    """Generate the Friday week summary + next week's meal plan + derived shopping list."""
     today = date.today()
     week_start = (today - timedelta(days=today.weekday())).isoformat()
     week_end = today.isoformat()
 
     days = get_week_logs(conn, week_start, week_end)
+    weight_history = get_weight_history(conn, limit=4)
 
     lines = ["*FRIDAY SUMMARY*", ""]
 
     if days:
         avg_protein = sum(d["protein_g"] for d in days) / len(days)
         avg_kcal = sum(d["kcal"] for d in days) / len(days)
+        protein_ok = avg_protein >= PROTEIN_TARGET_G * 0.9
         lines += [
-            f"Week ({week_start} → {week_end}), {len(days)} day(s) tracked:",
+            f"This week — {len(days)} day(s) tracked:",
             f"• Avg protein: {avg_protein:.0f}g / {PROTEIN_TARGET_G}g"
-            + (" ✓" if avg_protein >= PROTEIN_TARGET_G * 0.9 else " — short"),
+            + (" ✓" if protein_ok else f" — {PROTEIN_TARGET_G - avg_protein:.0f}g short on average"),
             f"• Avg calories: {avg_kcal:.0f} kcal",
-            "",
         ]
+        low_days = [d for d in days if d["protein_g"] < PROTEIN_TARGET_G * 0.75]
+        if low_days:
+            low_names = [date.fromisoformat(d["date"]).strftime("%a") for d in low_days]
+            lines.append(f"• Low days: {', '.join(low_names)}")
     else:
-        lines += ["No food logged this week.", ""]
+        lines.append("No food logged this week.")
 
-    next_week_idx = (today.isocalendar()[1] + 1) % len(_LUNCH_ROTATIONS)
-    next_rotation = _LUNCH_ROTATIONS[next_week_idx]
+    if weight_history:
+        latest = weight_history[0]
+        if len(weight_history) >= 2:
+            delta = weight_history[0]["weight_kg"] - weight_history[-1]["weight_kg"]
+            trend = f" ({'+' if delta > 0 else ''}{delta:.1f}kg trend)"
+        else:
+            trend = ""
+        lines.append(f"• Latest weight: {latest['weight_kg']}kg{trend}")
 
-    lines += [
-        "*NEXT WEEK'S BATCH COOK*",
-        next_rotation,
-        "",
-        "*WEEKEND SHOPPING*",
-        "Protein (pick 1–2):",
-        "• Wild salmon fillets ~400g",
-        "• Prawns 300g",
-        "• Eggs ×12 (if running low)",
-        "• Extra-firm tofu ×2 blocks",
-        "",
-        "Batch cook for " + next_rotation.split("—")[0].strip() + ":",
-        "• Fresh aromatics: garlic, ginger, spring onions, chillies",
-        "• Fresh veg: as needed for the rotation above",
-        "",
-        "Fridge restocks: Greek yoghurt 500g, oat milk, fresh spinach, peppers.",
-    ]
+    lines.append("")
+
+    # Generate next week's plan + shopping list
+    plan_section = _generate_week_plan(conn)
+    lines.append(plan_section)
 
     return "\n".join(lines)

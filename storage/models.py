@@ -231,6 +231,90 @@ def update_food_log(
     conn.commit()
 
 
+# ---------------------------------------------------------------------------
+# Weight tracking DDL + CRUD
+# ---------------------------------------------------------------------------
+
+WEIGHT_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS weight_logs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    date        TEXT    NOT NULL,   -- YYYY-MM-DD
+    weight_kg   REAL    NOT NULL
+)
+"""
+
+# ---------------------------------------------------------------------------
+# Meal plan DDL + CRUD
+# ---------------------------------------------------------------------------
+
+MEAL_PLAN_DDL = """
+CREATE TABLE IF NOT EXISTS meal_plans (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    week_start    TEXT    NOT NULL,   -- YYYY-MM-DD (Monday of the week)
+    slot          TEXT    NOT NULL,   -- e.g. 'mon_lunch', 'fri_dinner', 'sat_dinner'
+    recipe_slug   TEXT    NOT NULL,
+    confirmed     INTEGER DEFAULT 0
+)
+"""
+
+
+def log_weight(conn: sqlite3.Connection, date: str, weight_kg: float) -> int:
+    """Insert or replace today's weight log. Returns new row id."""
+    conn.execute("DELETE FROM weight_logs WHERE date = ?", (date,))
+    cur = conn.execute(
+        "INSERT INTO weight_logs (date, weight_kg) VALUES (?, ?)",
+        (date, weight_kg),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_weight_history(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
+    """Return the last N weight log entries, newest first."""
+    rows = conn.execute(
+        "SELECT * FROM weight_logs ORDER BY date DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_latest_weight(conn: sqlite3.Connection) -> dict | None:
+    """Return the most recent weight log entry, or None if none exist."""
+    row = conn.execute(
+        "SELECT * FROM weight_logs ORDER BY date DESC LIMIT 1",
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def insert_meal_plan(conn: sqlite3.Connection, week_start: str, slot: str, recipe_slug: str) -> int:
+    """Insert one slot of the meal plan. Returns new row id."""
+    cur = conn.execute(
+        "INSERT INTO meal_plans (week_start, slot, recipe_slug) VALUES (?, ?, ?)",
+        (week_start, slot, recipe_slug),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_meal_plan(conn: sqlite3.Connection, week_start: str) -> list[dict]:
+    """Return all slots for a given week, ordered by slot name."""
+    rows = conn.execute(
+        "SELECT * FROM meal_plans WHERE week_start = ? ORDER BY slot",
+        (week_start,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_recent_recipe_slugs(conn: sqlite3.Connection, weeks: int = 2) -> list[str]:
+    """Return recipe slugs used in the last N weeks — used to avoid repetition."""
+    rows = conn.execute(
+        """SELECT DISTINCT recipe_slug FROM meal_plans
+           ORDER BY week_start DESC LIMIT ?""",
+        (weeks * 10,),
+    ).fetchall()
+    return [r["recipe_slug"] for r in rows]
+
+
 def get_week_logs(conn: sqlite3.Connection, start_date: str, end_date: str) -> list[dict]:
     """Return daily totals for each day in the range [start_date, end_date].
 

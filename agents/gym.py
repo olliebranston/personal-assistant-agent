@@ -28,6 +28,8 @@ _KEY_EXERCISES: dict[str, list[str]] = {
 }
 
 # Slimmed-down plans: 1 main compound, 2–3 accessories, pick-1 isolation, 2 alternatives.
+_5K_TARGET_SECS = 20 * 60  # 20:00 — Ollie's goal
+
 _SESSION_PLANS: dict[str, str] = {
     "push": (
         "TODAY — PUSH (Chest, Shoulders, Triceps)\n"
@@ -74,8 +76,23 @@ _SESSION_PLANS: dict[str, str] = {
         "PICK ONE FOCUS\n"
         "• missed muscle — 5–6 exercises, one area, minimal rest\n"
         "• cardio — 20–25 min run (intervals or tempo)\n"
-        "• full-body circuit — bench / rows / squats / press, 3×8, move fast\n"
+        "• full-body circuit — bench / rows / squats / press, 3x8, move fast\n"
         "• weak point — arms, rear delts, calves tend to get dropped"
+    ),
+    "run": (
+        "TODAY — RUN\n"
+        "\n"
+        "EASY (aerobic base)\n"
+        "• 20–30 mins at 5:30–6:00/km — conversational pace\n"
+        "• Goal: aerobic base, active recovery\n"
+        "\n"
+        "TEMPO\n"
+        "• 5 min warmup jog → 15 mins at ~4:15/km effort → 5 min cooldown\n"
+        "• Comfortably hard — can't hold a conversation\n"
+        "\n"
+        "INTERVALS (5k-specific)\n"
+        "• 6–8 x 400m at hard effort (~4:00/km), 90s rest between\n"
+        "• This is the session that directly improves your 5k time"
     ),
 }
 
@@ -96,37 +113,51 @@ Override examples:
   "switch to legs"         → {"action": "suggest", "override": "legs"}
   "I want to do push"      → {"action": "suggest", "override": "push"}
   "short session today"    → {"action": "suggest", "override": "short"}
+  "going for a run"        → {"action": "suggest", "override": "run"}
 
 Week examples:
   "how did I do this week" → {"action": "week"}
   "how many sessions"      → {"action": "week"}
   "weekly gym summary"     → {"action": "week"}
+
+Run logging examples:
+  "ran 5k in 26:30"        → {"action": "log"}
+  "did a 3k run at 5:15/km" → {"action": "log"}
+  "ran 8k easy"            → {"action": "log"}
+
+Run history examples:
+  "how's my running"       → {"action": "history", "exercise": "run"}
+  "5k progress"            → {"action": "history", "exercise": "run"}
 """
 
 _LOG_PARSER_SYSTEM = """\
-Parse a gym workout log into structured JSON. Reply ONLY with valid JSON — no prose.
+Parse a gym or running session log into structured JSON. Reply ONLY with valid JSON — no prose.
 
 {
-  "session_type": "push|pull|legs|short",
+  "session_type": "push|pull|legs|short|run",
   "exercises": [
     {
       "exercise": "<name>",
-      "weight_kg": <number or null for bodyweight>,
+      "weight_kg": <number or null for bodyweight/running>,
       "warmup_kg": <number or null>,
       "sets": <integer>,
       "reps": <integer>,
-      "notes": "<form notes, drop sets, missed reps — or empty string>"
+      "notes": "<form notes, time, pace, distance — or empty string>"
     }
   ]
 }
 
-Rules:
+Gym rules:
 - Infer session_type from exercises (bench/OHP/dips→push, rows/pull-ups/curls→pull, squats/RDLs→legs).
 - Convert lbs to kg if specified (×0.4536), round to 1 decimal.
 - "5x5" or "5×5" → sets=5, reps=5.
-- If reps varied (8,8,7), use the first number as target reps.
 - warmup_kg only if user noted a warm-up weight (e.g. "s40").
-- Omit exercises you cannot parse.
+
+Run rules:
+- session_type = "run" if the message mentions running/ran/jog.
+- Create one exercise entry: exercise="5k run" (or the actual distance), weight_kg=null, sets=1, reps=1.
+- Put the time/pace in notes: e.g. notes="26:30, 5:18/km" or notes="easy 30 min".
+- If user says "5k in 26:30": reps=1, notes="26:30".
 """
 
 _AFFIRMATIVES = frozenset({
@@ -214,7 +245,30 @@ def _format_last_session(session: dict) -> str:
 
 
 def _get_progression_hints(conn: sqlite3.Connection, session_type: str) -> list[str]:
-    """Pull last logged weight for key exercises and suggest +2.5kg or +1 rep."""
+    """Compute +2.5kg / +1 rep targets for every exercise in the last session of this type.
+
+    Falls back to key exercises only if there's no logged session to pull from.
+    """
+    last = _get_last_session_of_type(conn, session_type)
+    if last and last.get("sets"):
+        # Generate hints for EVERY exercise in the last session
+        hints = []
+        for ex in last["sets"]:
+            weight = ex.get("weight_kg")
+            notes = (ex.get("notes") or "").lower()
+            failed = any(w in notes for w in ("fail", "missed", "short", "couldn't", "only"))
+            name = ex.get("exercise", "?")
+
+            if weight is None:
+                next_reps = ex["reps"] if failed else ex["reps"] + 1
+                hints.append(f"  {name}: BW {ex['sets']}x{ex['reps']} -> aim {ex['sets']}x{next_reps}")
+            else:
+                next_weight = weight if failed else round((weight + 2.5) * 2) / 2
+                suffix = " (same — missed last time)" if failed else ""
+                hints.append(f"  {name}: {weight}kg -> try {next_weight}kg{suffix}")
+        return hints
+
+    # No logged session — fall back to key exercises only
     hints = []
     for ex in _KEY_EXERCISES.get(session_type, []):
         rows = get_last_sets_for_exercise(conn, ex, limit=1)
@@ -224,18 +278,11 @@ def _get_progression_hints(conn: sqlite3.Connection, session_type: str) -> list[
         weight = r["weight_kg"]
         notes = (r.get("notes") or "").lower()
         failed = any(w in notes for w in ("fail", "missed", "short", "couldn't", "only"))
-
         if weight is None:
-            next_reps = r["reps"] if failed else r["reps"] + 1
-            hints.append(
-                f"  {ex.title()}: BW {r['sets']}×{r['reps']} last time ({r['date']}) → aim {r['sets']}×{next_reps} today"
-            )
+            hints.append(f"  {ex.title()}: BW {r['sets']}x{r['reps']} -> aim {r['sets']}x{r['reps'] + (0 if failed else 1)}")
         else:
             next_weight = weight if failed else round((weight + 2.5) * 2) / 2
-            suffix = " (same weight — didn't nail it last time)" if failed else ""
-            hints.append(
-                f"  {ex.title()}: {weight}kg last time ({r['date']}) → try {next_weight}kg{suffix}"
-            )
+            hints.append(f"  {ex.title()}: {weight}kg -> try {next_weight}kg")
     return hints
 
 
@@ -245,7 +292,7 @@ async def _suggest_next_session(
     override_type: str | None = None,
 ) -> str:
     """Return the exercise plan for the next PPL session with last-session recap + progression hints."""
-    session_type = override_type if override_type in (*_PPL_CYCLE, "short") else get_next_session_type(conn)
+    session_type = override_type if override_type in (*_PPL_CYCLE, "short", "run") else get_next_session_type(conn)
 
     parts: list[str] = []
 
@@ -313,13 +360,26 @@ async def _log_workout(conn: sqlite3.Connection, text: str) -> str:
         )
 
     lines.append("\nLogged to your session history.")
+
+    # Post-workout protein nudge
+    try:
+        from storage.models import get_daily_totals
+        totals = get_daily_totals(conn, today)
+        if totals["protein_g"] < 100:
+            lines.append("\nPost-session — get a shake in now. 48g from 2 scoops while the window's open.")
+    except Exception:
+        pass
+
     return "\n".join(lines)
 
 
 async def _query_history(conn: sqlite3.Connection, exercise: str) -> str:
-    """Return the last 5 logged sets for an exercise."""
+    """Return the last 5 logged sets for an exercise. Special-cases 'run' for 5k tracking."""
     if not exercise:
         return "Which exercise? e.g. 'bench history' or 'squat last'"
+
+    if "run" in exercise.lower():
+        return _run_history(conn)
 
     rows = get_last_sets_for_exercise(conn, exercise, limit=5)
     if not rows:
@@ -331,8 +391,45 @@ async def _query_history(conn: sqlite3.Connection, exercise: str) -> str:
         warmup_str = f" (warmup {r['warmup_kg']}kg)" if r.get("warmup_kg") else ""
         note_str = f"  {r['notes']}" if r.get("notes") else ""
         lines.append(
-            f"  {r['date']}  {weight_str}{warmup_str}  {r['sets']}×{r['reps']}{note_str}"
+            f"  {r['date']}  {weight_str}{warmup_str}  {r['sets']}x{r['reps']}{note_str}"
         )
+
+    return "\n".join(lines)
+
+
+def _run_history(conn: sqlite3.Connection) -> str:
+    """Return running history with 5k progress toward the 20-min goal."""
+    rows = get_last_sets_for_exercise(conn, "5k run", limit=6)
+    if not rows:
+        rows = get_last_sets_for_exercise(conn, "run", limit=6)
+    if not rows:
+        return "No runs logged yet. Log with: 'ran 5k in 26:30'"
+
+    lines = ["RUNNING HISTORY"]
+    for r in rows:
+        notes = r.get("notes", "")
+        line = f"  {r['date']}  {r['exercise']}"
+        if notes:
+            line += f" — {notes}"
+        lines.append(line)
+
+    # Parse most recent 5k time and show gap to goal
+    for r in rows:
+        notes = r.get("notes", "")
+        if "5k" in r.get("exercise", "").lower() and ":" in notes:
+            time_part = notes.split(",")[0].strip()
+            try:
+                parts = time_part.split(":")
+                total_secs = int(parts[0]) * 60 + int(parts[1])
+                gap_secs = total_secs - _5K_TARGET_SECS
+                if gap_secs > 0:
+                    gap_mins, gap_s = divmod(gap_secs, 60)
+                    lines.append(f"\nLatest 5k: {time_part}. Goal: 20:00. Gap: {gap_mins}:{gap_s:02d} to drop.")
+                else:
+                    lines.append(f"\nLatest 5k: {time_part}. Goal achieved.")
+                break
+            except (ValueError, IndexError):
+                pass
 
     return "\n".join(lines)
 

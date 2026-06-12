@@ -11,6 +11,9 @@ from telegram.ext import Application
 import config
 from agents import gym as gym_agent
 from agents import meal as meal_agent
+from data.recipes import RECIPES
+from services import news as news_svc
+from services.google_calendar import get_service, list_events
 from storage.db import get_connection
 from storage.models import get_daily_totals
 
@@ -19,148 +22,210 @@ logger = logging.getLogger(__name__)
 _TZ = ZoneInfo("Europe/London")
 _UID = config.TELEGRAM_ALLOWED_USER_ID
 
+
 # ── Batch cook recipe cards (Sunday job) ─────────────────────────────────────
 
-_RECIPES = {
-    "A": {
-        "name": "Red Lentil Dal",
-        "protein": "~35–47g (with tofu or yoghurt boost)",
-        "time": "30 mins",
-        "ingredients": (
-            "250g red lentils, 1 tin tomatoes, 1 tin coconut milk, "
-            "150g spinach, 1 onion, 4 garlic cloves, 2cm ginger, "
-            "1 tsp cumin, 1 tsp turmeric, 1 tsp garam masala, chilli to taste"
-        ),
-        "method": (
-            "1. Fry onion 5 mins, add garlic + ginger + spices, 2 mins.\n"
-            "2. Add lentils, tomatoes, coconut milk + 300ml water. Simmer 20 mins.\n"
-            "3. Stir in spinach until wilted. Season hard.\n"
-            "4. Portion into 4 containers. Add 150g baked tofu or dollop Greek yoghurt per portion."
-        ),
-    },
-    "B": {
-        "name": "Lentil & Baked Tofu Salad",
-        "protein": "~30–41g",
-        "time": "40 mins",
-        "ingredients": (
-            "250g puy lentils, 400g firm tofu, roasted red peppers (jar fine), "
-            "cucumber, cherry tomatoes, parsley, "
-            "dressing: 3 tbsp tahini, 2 tbsp lemon juice, 1 tbsp soy, water to loosen"
-        ),
-        "method": (
-            "1. Cook lentils 20 mins, drain, cool.\n"
-            "2. Cube tofu, toss in soy + sesame oil, roast 200°C 20 mins (crispy edges).\n"
-            "3. Chop veg, mix everything together.\n"
-            "4. Dress to coat. Portion into 4 containers. Hemp seeds on top optional (+6g protein)."
-        ),
-    },
-    "C": {
-        "name": "Tofu Egg Fried Rice",
-        "protein": "~28–33g",
-        "time": "25 mins",
-        "ingredients": (
-            "300g brown rice (dry), 400g firm tofu, 8 eggs, 200g edamame (frozen), "
-            "soy sauce, sesame oil, ginger, 4 spring onions, 2 garlic cloves, chilli"
-        ),
-        "method": (
-            "1. Cook rice, spread on tray to cool (stops clumping).\n"
-            "2. Crumble tofu into pan with oil, fry until golden. Set aside.\n"
-            "3. Scramble eggs in same pan, add cold rice, fry until separated.\n"
-            "4. Add edamame, tofu, soy + sesame oil, spring onions. Toss. Portion ×4."
-        ),
-    },
-    "D": {
-        "name": "Black Bean & Sweet Potato Stew",
-        "protein": "~32–46g (with tempeh or yoghurt)",
-        "time": "35 mins",
-        "ingredients": (
-            "2 tins black beans, 1 tin kidney beans, 2 sweet potatoes, "
-            "1 tin tomatoes, 1 tsp smoked paprika, 1 tsp cumin, 1 chipotle (or 1 tsp paste), "
-            "lime, coriander"
-        ),
-        "method": (
-            "1. Dice sweet potato, roast 200°C 20 mins.\n"
-            "2. Fry onion + spices 5 mins, add beans + tomatoes + 200ml water.\n"
-            "3. Simmer 15 mins, add sweet potato + lime juice.\n"
-            "4. Portion ×4. Serve with Greek yoghurt + hot sauce, or sliced tempeh on top."
-        ),
-    },
-    "E": {
-        "name": "Quinoa Power Bowl",
-        "protein": "~25–40g (with tofu or tempeh)",
-        "time": "35 mins",
-        "ingredients": (
-            "300g quinoa (dry), 1 tin chickpeas, mixed roast veg (whatever's in the fridge), "
-            "200g spinach, dressing: miso paste, tahini, rice vinegar, sesame oil, chilli flakes"
-        ),
-        "method": (
-            "1. Cook quinoa 15 mins, cool.\n"
-            "2. Roast veg + chickpeas at 200°C 25 mins (season well).\n"
-            "3. Wilt spinach in a pan with garlic.\n"
-            "4. Whisk dressing, assemble bowls. Add baked tofu or tempeh to push protein to 40g+."
-        ),
-    },
-}
+_BATCH_SLUGS = [
+    "red_lentil_dal",
+    "lentil_tofu_salad",
+    "tofu_egg_fried_rice",
+    "black_bean_sweet_potato_stew",
+    "quinoa_power_bowl",
+]
 
 
-def _get_batch_cook_suggestion() -> str:
-    """Return this week's batch cook rotation with a full recipe card."""
-    idx = datetime.date.today().isocalendar()[1] % len(_RECIPES)
-    key = list(_RECIPES.keys())[idx]
-    r = _RECIPES[key]
+def _get_batch_cook_message() -> str:
+    """Return this week's batch cook recipe card from the recipes database."""
+    idx = datetime.date.today().isocalendar()[1] % len(_BATCH_SLUGS)
+    slug = _BATCH_SLUGS[idx]
+    recipe = RECIPES.get(slug, {})
 
-    lines = [
-        f"*Batch cook Sunday — Rotation {key}: {r['name']}*",
-        f"Protein: {r['protein']}  |  Time: {r['time']}",
-        "",
-        "*Ingredients (4 portions):*",
-        r["ingredients"],
-        "",
-        "*Method:*",
-        r["method"],
-        "",
-        "*Order of ops:*",
-        "  1. Start grains/lentils first — hands off while you prep veg.",
-        "  2. Roast tofu/veg simultaneously in the oven.",
-        "  3. Make sauces/dressings while things cool.",
-        "  4. Portion into containers, label with day.",
-    ]
+    name = recipe.get("name", slug)
+    time_mins = recipe.get("time_mins", "?")
+    protein = recipe.get("protein_g", "?")
+
+    lines = [f"*Batch cook Sunday — {name}*",
+             f"_{time_mins} mins · {protein}g protein per portion_", ""]
+
+    lines.append("*INGREDIENTS (4 portions)*")
+    for ing in recipe.get("ingredients", []):
+        qty = f"{ing['qty']:g}" if isinstance(ing["qty"], (int, float)) else str(ing["qty"])
+        unit = f"{ing['unit']} " if ing.get("unit") else ""
+        lines.append(f"• {qty} {unit}{ing['item']}")
+
+    lines.append("")
+    lines.append("*METHOD*")
+    for i, step in enumerate(recipe.get("method", []), 1):
+        lines.append(f"{i}. {step}")
+
+    lines += ["", "*ORDER OF OPS*",
+              "1. Start grains/lentils first — hands off while you prep veg.",
+              "2. Roast tofu/veg simultaneously.",
+              "3. Make sauces/dressings while things cool.",
+              "4. Portion into containers, label with day."]
     return "\n".join(lines)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def _fmt_event_time(dt_str: str) -> str:
+    """Format an ISO datetime string as 'HH:MM' in London time."""
+    if not dt_str:
+        return ""
+    try:
+        dt = datetime.datetime.fromisoformat(dt_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_TZ)
+        else:
+            dt = dt.astimezone(_TZ)
+        return dt.strftime("%H:%M")
+    except ValueError:
+        return dt_str[:10]  # just the date portion if parsing fails
+
+
+def _get_today_calendar_events() -> list[str]:
+    """Return formatted strings for today's calendar events. Returns [] on any failure."""
+    try:
+        service = get_service()
+        now = datetime.datetime.now(tz=_TZ)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        today_end = now.replace(hour=23, minute=59, second=59, microsecond=0).isoformat()
+        events = list_events(service, today_start, today_end)
+        result = []
+        for ev in events:
+            time_str = _fmt_event_time(ev["start"])
+            loc = f" @ {ev['location']}" if ev.get("location") else ""
+            result.append(f"• {time_str} — {ev['summary']}{loc}" if time_str else f"• {ev['summary']}{loc}")
+        return result
+    except Exception as exc:
+        logger.debug("Calendar fetch for morning briefing failed: %s", exc)
+        return []
+
+
+def _get_horses_today() -> list[str]:
+    """Return bullet strings for any horses running today. Returns [] if none or API unavailable."""
+    try:
+        # Use cached result — don't make a fresh API call at 7:45am
+        from services.news import _get_cache
+        cached = _get_cache("horse_entries")
+        if not cached or cached.get("_rate_limited"):
+            return []
+        result = []
+        for horse_key, entries in cached.items():
+            if horse_key.startswith("_"):
+                continue
+            for entry in entries:
+                if entry.get("day_label") == "today":
+                    from services.news import _fmt_dist
+                    dist = _fmt_dist(entry.get("distance_f", ""))
+                    result.append(
+                        f"• {horse_key.title()} — {entry['course']}, "
+                        f"off {entry['off_time']}, {dist}, {entry['going']}"
+                    )
+        return result
+    except Exception as exc:
+        logger.debug("Horses today fetch failed: %s", exc)
+        return []
+
+
+def _get_gym_targets(conn) -> list[str]:
+    """Return progression target lines for the next gym session."""
+    try:
+        next_type = gym_agent.get_next_session_type(conn)
+        last = gym_agent._get_last_session_of_type(conn, next_type)
+        if not last:
+            return [f"Next: {next_type.title()} day — no previous session logged."]
+
+        days_ago = (datetime.date.today() - datetime.date.fromisoformat(last["date"])).days
+        age = f"{days_ago}d ago" if days_ago > 0 else "today"
+        lines = [f"Next: {next_type.title()} day (last was {age})"]
+
+        # Progression for every exercise in the last session
+        for ex in last.get("sets", []):
+            weight = ex.get("weight_kg")
+            notes = (ex.get("notes") or "").lower()
+            failed = any(w in notes for w in ("fail", "missed", "short", "couldn't"))
+            if weight is None:
+                next_reps = ex["reps"] if failed else ex["reps"] + 1
+                lines.append(f"• {ex['exercise']} BW {ex['sets']}×{ex['reps']} → aim {ex['sets']}×{next_reps}")
+            else:
+                next_w = weight if failed else round((weight + 2.5) * 2) / 2
+                lines.append(f"• {ex['exercise']} {weight}kg → try {next_w}kg")
+        return lines
+    except Exception as exc:
+        logger.debug("Gym targets failed: %s", exc)
+        return []
+
+
+def _get_chelsea_headline() -> str | None:
+    """Return the most recent Chelsea news headline if it's less than 12h old."""
+    try:
+        from services.news import _get_cache
+        cached = _get_cache("chelsea")
+        if not cached:
+            return None
+        import time
+        now = time.time()
+        for item in cached:
+            if now - item.get("published", 0) < 43200:  # 12 hours
+                return item.get("title", "")
+        return None
+    except Exception:
+        return None
 
 
 # ── Job callbacks ─────────────────────────────────────────────────────────────
 
 
 async def _morning_briefing(context) -> None:
-    """7:45 AM daily: breakfast suggestion + next gym session."""
+    """7:45 AM daily: smart morning brief — calendar, training targets, horses, breakfast."""
     today = datetime.date.today()
     weekday = today.weekday()
-
-    breakfast = meal_agent.get_breakfast(weekday)
+    day_name = today.strftime("%A")
 
     conn = get_connection()
     try:
-        next_session = gym_agent.get_next_session_type(conn)
+        sections: list[str] = [day_name + "."]
+
+        # Calendar
+        events = _get_today_calendar_events()
+        if events:
+            sections.append("\nTODAY")
+            sections.extend(events)
+
+        # Training
+        gym_lines = _get_gym_targets(conn)
+        if gym_lines:
+            sections.append("\nTRAINING")
+            sections.extend(gym_lines)
+
+        # Horses
+        horses = _get_horses_today()
+        if horses:
+            sections.append("\nHORSES")
+            sections.extend(horses)
+
+        # Chelsea headline (only if fresh)
+        chelsea = _get_chelsea_headline()
+        if chelsea:
+            sections.append(f"\nCHELSEA\n• {chelsea}")
+
+        # Breakfast
+        breakfast = meal_agent.get_breakfast(weekday)
+        sections.append(f"\nBREAKFAST\n{breakfast}")
+
+        # Calorie note
+        is_weekend = weekday >= 5
+        sections.append(
+            "\n2,950 kcal target (rest day)."
+            if is_weekend
+            else "\n3,300 kcal if lifting today. Protein target: 230g."
+        )
+
+        await context.bot.send_message(chat_id=_UID, text="\n".join(sections))
     finally:
         conn.close()
-
-    day_name = today.strftime("%A")
-    is_weekend = weekday >= 5
-    cal_note = (
-        "Rest day — 2,950 kcal target."
-        if is_weekend
-        else f"Gym day target: 3,300 kcal (if lifting). 2,950 if rest."
-    )
-
-    lines = [
-        f"{day_name}.",
-        "",
-        f"Breakfast: {breakfast}",
-        "",
-        f"Next session: {next_session.title()} day. {cal_note}",
-        "Protein target: 230g. Start strong.",
-    ]
-    await context.bot.send_message(chat_id=_UID, text="\n".join(lines))
 
 
 async def _midmorning_checkin(context) -> None:
@@ -175,11 +240,10 @@ async def _midmorning_checkin(context) -> None:
     if totals["protein_g"] >= 60:
         return
 
-    logged = totals["protein_g"]
     await context.bot.send_message(
         chat_id=_UID,
         text=(
-            f"Mid-morning: {logged:.0f}g protein logged.\n"
+            f"Mid-morning: {totals['protein_g']:.0f}g protein logged.\n"
             "Breakfast done? 60g by 11am keeps the day on track."
         ),
     )
@@ -207,20 +271,32 @@ async def _end_of_day_summary(context) -> None:
     )
 
 
-async def _friday_shopping_list(context) -> None:
-    """5:00 PM Friday: week summary + next week's shopping list."""
+async def _friday_meal_plan(context) -> None:
+    """5:00 PM Friday: week summary + next week's meal plan + derived shopping list."""
     conn = get_connection()
     try:
         summary = meal_agent.build_friday_summary(conn)
     finally:
         conn.close()
 
-    await context.bot.send_message(chat_id=_UID, text=summary, parse_mode="Markdown")
+    # Telegram has a 4096-char limit — split if needed
+    if len(summary) <= 4096:
+        await context.bot.send_message(chat_id=_UID, text=summary, parse_mode="Markdown")
+    else:
+        # Split at the shopping list section
+        split_marker = "*SHOPPING LIST*"
+        idx = summary.find(split_marker)
+        if idx > 0:
+            part1, part2 = summary[:idx].strip(), summary[idx:].strip()
+        else:
+            part1, part2 = summary[:4090], summary[4090:]
+        await context.bot.send_message(chat_id=_UID, text=part1, parse_mode="Markdown")
+        await context.bot.send_message(chat_id=_UID, text=part2, parse_mode="Markdown")
 
 
 async def _sunday_batch_cook(context) -> None:
     """10:00 AM Sunday: batch cook recipe card for this week's rotation."""
-    recipe_msg = _get_batch_cook_suggestion()
+    recipe_msg = _get_batch_cook_message()
     await context.bot.send_message(chat_id=_UID, text=recipe_msg, parse_mode="Markdown")
 
 
@@ -249,7 +325,7 @@ def register_jobs(app: Application) -> None:
         time=datetime.time(23, 0, tzinfo=_TZ),
     )
     jq.run_daily(
-        _friday_shopping_list,
+        _friday_meal_plan,
         time=datetime.time(17, 0, tzinfo=_TZ),
         days=(4,),  # Friday
     )
@@ -259,4 +335,7 @@ def register_jobs(app: Application) -> None:
         days=(6,),  # Sunday
     )
 
-    logger.info("Scheduled jobs registered: morning 7:45, mid-morning 10:30, evening 21:00, EOD 23:00, Friday 17:00, Sunday 10:00")
+    logger.info(
+        "Jobs registered: morning 07:45, mid-morning 10:30 (weekdays), "
+        "evening 21:00, EOD 23:00, Friday 17:00, Sunday 10:00"
+    )

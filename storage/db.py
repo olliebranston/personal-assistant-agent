@@ -3,7 +3,13 @@
 import sqlite3
 from pathlib import Path
 
-from storage.models import EXERCISE_SET_DDL, FOOD_LOG_DDL, GYM_SESSION_DDL
+from storage.models import (
+    EXERCISE_SET_DDL,
+    FOOD_LOG_DDL,
+    GYM_SESSION_DDL,
+    MEAL_PLAN_DDL,
+    WEIGHT_LOG_DDL,
+)
 
 DB_PATH = Path("assistant.db")
 
@@ -27,5 +33,7 @@ def init_db() -> None:
     conn.execute(GYM_SESSION_DDL)
     conn.execute(EXERCISE_SET_DDL)
     conn.execute(FOOD_LOG_DDL)
+    conn.execute(WEIGHT_LOG_DDL)
+    conn.execute(MEAL_PLAN_DDL)
     conn.commit()
     conn.close()
