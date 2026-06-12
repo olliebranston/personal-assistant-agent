@@ -32,21 +32,6 @@ If nothing is actually newsworthy, reply with exactly:
 No significant Chelsea news in the last 48 hours.
 """
 
-_RACING_SYSTEM = """\
-Summarise horse racing news for Ollie, who is the owner or part-owner of these horses.
-Use ownership tone: "Diamond Bay runs at Newbury on Saturday" — never "is reported to run".
-
-For each horse where the articles mention a specific race entry, result, odds, or trainer comment:
-write one concise line. Skip horses where articles are vague or contain no racing specifics.
-
-Output format — one bullet per horse with concrete news, no preamble:
-• Diamond Bay — runs at Newbury Saturday 14 June
-• Shady Bay — won at Ascot on Tuesday, returned 4/1
-
-If no horse has concrete news, reply with exactly one line:
-No specific updates for your horses.
-"""
-
 
 async def handle(text: str, user_id: int = 0) -> str:
     """Fetch Chelsea and horse racing news, return formatted Telegram response."""

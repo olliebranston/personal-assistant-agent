@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 
 import services.state as state_svc
 from services.openrouter import complete
@@ -88,13 +88,19 @@ Classify the user's gym message into exactly one action. Reply ONLY with valid J
 {"action": "suggest", "override": "push|pull|legs|short"}                 — explicitly requests a specific session type
 {"action": "log"}                                                          — logging a completed workout
 {"action": "history", "exercise": "<name or empty string>"}               — wants exercise history / progressive overload data
+{"action": "week"}                                                         — wants a summary of this week's gym sessions
 {"action": "clarify", "question": "<one short question>"}                 — intent unclear
 
 Override examples:
-  "give me pull day"     → {"action": "suggest", "override": "pull"}
-  "switch to legs"       → {"action": "suggest", "override": "legs"}
-  "I want to do push"   → {"action": "suggest", "override": "push"}
-  "short session today"  → {"action": "suggest", "override": "short"}
+  "give me pull day"       → {"action": "suggest", "override": "pull"}
+  "switch to legs"         → {"action": "suggest", "override": "legs"}
+  "I want to do push"      → {"action": "suggest", "override": "push"}
+  "short session today"    → {"action": "suggest", "override": "short"}
+
+Week examples:
+  "how did I do this week" → {"action": "week"}
+  "how many sessions"      → {"action": "week"}
+  "weekly gym summary"     → {"action": "week"}
 """
 
 _LOG_PARSER_SYSTEM = """\
@@ -160,6 +166,8 @@ async def handle(conn: sqlite3.Connection, text: str, user_id: int = 0) -> str:
     if action == "history":
         exercise = intent.get("exercise", "").strip()
         return await _query_history(conn, exercise)
+    if action == "week":
+        return _week_summary(conn)
     if action == "clarify":
         return intent.get("question", "Session plan, log your lifts, or check history?")
     return "Session plan, log your lifts, or check history?"
@@ -326,6 +334,34 @@ async def _query_history(conn: sqlite3.Connection, exercise: str) -> str:
             f"  {r['date']}  {weight_str}{warmup_str}  {r['sets']}×{r['reps']}{note_str}"
         )
 
+    return "\n".join(lines)
+
+
+def _week_summary(conn: sqlite3.Connection) -> str:
+    """Return this week's gym sessions — dates, types, and key lifts."""
+    today = date.today()
+    week_start = (today - timedelta(days=today.weekday())).isoformat()
+
+    sessions = get_recent_sessions(conn, limit=20)
+    this_week = [s for s in sessions if s.get("date", "") >= week_start]
+
+    if not this_week:
+        return f"Nothing logged this week yet (started {week_start})."
+
+    lines = [f"THIS WEEK · {len(this_week)} session{'s' if len(this_week) != 1 else ''}"]
+
+    for session in reversed(this_week):  # chronological order
+        try:
+            day_name = date.fromisoformat(session["date"]).strftime("%A")
+        except ValueError:
+            day_name = session["date"]
+        lines.append(f"\n{day_name.upper()} — {session['session_type'].upper()}")
+        for ex in session.get("sets", []):
+            weight = f"{ex['weight_kg']}kg" if ex.get("weight_kg") is not None else "BW"
+            lines.append(f"• {ex['exercise']} — {weight} {ex['sets']}×{ex['reps']}")
+
+    next_type = get_next_session_type(conn)
+    lines.append(f"\nNext up: {next_type.title()} day.")
     return "\n".join(lines)
 
 
