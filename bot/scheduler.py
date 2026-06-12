@@ -11,6 +11,7 @@ from telegram.ext import Application
 import config
 from agents import gym as gym_agent
 from agents import meal as meal_agent
+from agents.meal import _format_yesterday_slot_for_prompt
 from data.recipes import RECIPES
 from services import news as news_svc
 from services.google_calendar import get_service, list_events
@@ -211,9 +212,17 @@ async def _morning_briefing(context) -> None:
         if chelsea:
             sections.append(f"\nCHELSEA\n• {chelsea}")
 
-        # Breakfast
-        breakfast = meal_agent.get_breakfast(weekday)
-        sections.append(f"\nBREAKFAST\n{breakfast}")
+        # Breakfast — on Tue/Wed/Thu offer to repeat yesterday's if logged
+        if weekday in (1, 2, 3):  # Tue, Wed, Thu
+            yesterday_breakfast = _format_yesterday_slot_for_prompt(conn, "breakfast")
+            if yesterday_breakfast:
+                sections.append(f"\nBREAKFAST\nSame as yesterday? {yesterday_breakfast}\nSay 'same breakfast' to log it.")
+            else:
+                breakfast = meal_agent.get_breakfast(weekday)
+                sections.append(f"\nBREAKFAST\n{breakfast}")
+        else:
+            breakfast = meal_agent.get_breakfast(weekday)
+            sections.append(f"\nBREAKFAST\n{breakfast}")
 
         # Calorie note
         is_weekend = weekday >= 5
@@ -226,6 +235,28 @@ async def _morning_briefing(context) -> None:
         await context.bot.send_message(chat_id=_UID, text="\n".join(sections))
     finally:
         conn.close()
+
+
+async def _lunch_prompt(context) -> None:
+    """12:30 PM Tue/Wed/Thu: suggest logging same lunch as yesterday if it was logged."""
+    conn = get_connection()
+    try:
+        yesterday_lunch = _format_yesterday_slot_for_prompt(conn, "lunch")
+    finally:
+        conn.close()
+
+    if yesterday_lunch:
+        await context.bot.send_message(
+            chat_id=_UID,
+            text=f"Lunch time. Same as yesterday?\n{yesterday_lunch}\nSay 'same lunch' to log it.",
+        )
+    else:
+        # Nothing logged yesterday — send generic batch cook reminder
+        rotation = meal_agent.get_lunch_rotation()
+        await context.bot.send_message(
+            chat_id=_UID,
+            text=f"Lunch time. Batch cook:\n{rotation.split('—')[0].strip()} — log it when you've had it.",
+        )
 
 
 async def _midmorning_checkin(context) -> None:
@@ -317,6 +348,11 @@ def register_jobs(app: Application) -> None:
         days=(0, 1, 2, 3, 4),  # weekdays only
     )
     jq.run_daily(
+        _lunch_prompt,
+        time=datetime.time(12, 30, tzinfo=_TZ),
+        days=(1, 2, 3),  # Tue, Wed, Thu only
+    )
+    jq.run_daily(
         _evening_dinner_prompt,
         time=datetime.time(21, 0, tzinfo=_TZ),
     )
@@ -337,5 +373,5 @@ def register_jobs(app: Application) -> None:
 
     logger.info(
         "Jobs registered: morning 07:45, mid-morning 10:30 (weekdays), "
-        "evening 21:00, EOD 23:00, Friday 17:00, Sunday 10:00"
+        "lunch prompt 12:30 (Tue-Thu), evening 21:00, EOD 23:00, Friday 17:00, Sunday 10:00"
     )

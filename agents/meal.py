@@ -96,10 +96,12 @@ Classify the user's meal/nutrition message. Reply ONLY with valid JSON — no pr
 {"action": "weight"}                        — logging or querying body weight (e.g. "I weighed 104.2kg", "how's my weight going")
 {"action": "recipe"}                        — wants a recipe, ingredients or method for a meal (e.g. "give me the recipe for miso salmon", "how do I make pad thai", "ingredients for dal")
 {"action": "week_plan"}                     — wants a weekly meal plan + shopping list (e.g. "plan my week", "what am I cooking this week", "generate a meal plan")
+{"action": "repeat", "slot": "breakfast|lunch"}  — wants to log the same meal as yesterday for a specific slot (e.g. "same breakfast", "same lunch as yesterday", "log same breakfast", "yes same lunch")
 {"action": "suggest", "meal": "breakfast|lunch|dinner|snack"}  — wants a single meal suggestion
 {"action": "clarify", "question": "<one short question>"}      — intent unclear
 
 Key distinctions:
+- "same breakfast/lunch", "log same", "repeat yesterday's" → repeat
 - "recipe", "how do I make", "ingredients for" → recipe
 - "plan my week", "meal plan", "shopping list" → week_plan
 - "I weigh", "weighed", "my weight" → weight
@@ -186,6 +188,11 @@ async def handle(conn: sqlite3.Connection, text: str, user_id: int = 0) -> str:
         return _history_summary(conn)
     if action == "week":
         return _week_summary(conn)
+    if action == "repeat":
+        slot = intent.get("slot", "").strip().lower()
+        if slot not in ("breakfast", "lunch"):
+            return "Which meal — breakfast or lunch?"
+        return _repeat_yesterday_meal(conn, slot)
     if action == "weight":
         return await _handle_weight(conn, text)
     if action == "recipe":
@@ -519,6 +526,53 @@ def _get_calorie_target(conn: sqlite3.Connection) -> int:
         if s["date"] == today and s["session_type"] in ("push", "pull", "legs"):
             return CALORIE_TARGETS["weights"]
     return CALORIE_TARGETS["rest"]
+
+
+def _repeat_yesterday_meal(conn: sqlite3.Connection, slot: str) -> str:
+    """Re-log yesterday's entries for a given meal slot into today's log."""
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    yesterday_logs = get_food_logs_for_date(conn, yesterday)
+    slot_items = [l for l in yesterday_logs if l["meal_slot"] == slot]
+
+    if not slot_items:
+        return f"Nothing logged for {slot} yesterday — nothing to repeat."
+
+    today = date.today().isoformat()
+    total_protein = 0.0
+    total_kcal = 0.0
+    for item in slot_items:
+        insert_food_log(conn, FoodLog(
+            date=today,
+            meal_slot=slot,
+            description=item["description"],
+            protein_g=item["protein_g"],
+            kcal=item["kcal"],
+            source=item["source"],
+        ))
+        total_protein += item["protein_g"]
+        total_kcal += item["kcal"]
+
+    totals = get_daily_totals(conn, today)
+    cal_target = _get_calorie_target(conn)
+    protein_remaining = max(PROTEIN_TARGET_G - totals["protein_g"], 0)
+
+    lines = [f"Logged — same {slot} as yesterday: {total_protein:.0f}g protein, {total_kcal:.0f} kcal."]
+    lines.append(f"Today: {totals['protein_g']:.0f}g protein / {totals['kcal']:.0f} kcal (target: {cal_target} kcal)")
+    if protein_remaining > 0:
+        lines.append(f"{protein_remaining:.0f}g protein to go.")
+    return "\n".join(lines)
+
+
+def _format_yesterday_slot_for_prompt(conn: sqlite3.Connection, slot: str) -> str | None:
+    """Return a compact description of yesterday's logged items for a slot, or None."""
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    logs = get_food_logs_for_date(conn, yesterday)
+    items = [l for l in logs if l["meal_slot"] == slot]
+    if not items:
+        return None
+    total_protein = sum(l["protein_g"] for l in items)
+    descriptions = ", ".join(l["description"] for l in items)
+    return f"{descriptions} ({total_protein:.0f}g protein)"
 
 
 def _source_flag(source: str) -> str:
