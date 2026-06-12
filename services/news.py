@@ -181,36 +181,38 @@ def _fmt_dist(dist_f_str: str) -> str:
         return f"{int(miles)}m{rem:g}f"
 
 
-async def _fetch_racecard_entries(day: str, auth: httpx.BasicAuth) -> list[dict]:
-    """Fetch one day's racecards and return runners from our HORSES list.
+async def _fetch_racecard_entries(day: str, auth: httpx.BasicAuth) -> tuple[list[dict], bool]:
+    """Fetch one day's racecards and return (runners_found, rate_limited).
 
-    Retries once on 429 (rate limit) after a 2-second pause.
+    Returns ([], True) on 429 — no retry, quota exhaustion won't recover in seconds.
+    Returns ([], False) on other errors or when no matches found.
     """
-    found = []
-    for attempt in range(2):
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(
-                    f"{_RACING_API_BASE}/racecards/free",
-                    params={"day": day},
-                    auth=auth,
-                )
-            if resp.status_code == 429:
-                if attempt == 0:
-                    logger.debug("Racing API rate limited on %s — retrying in 2s", day)
-                    await asyncio.sleep(2)
-                    continue
-                logger.warning("Racing API rate limited on %s after retry", day)
-                return found
-            resp.raise_for_status()
-            data = resp.json()
-            break
-        except Exception as exc:
-            logger.warning("Racing API racecard fetch (%s) failed: %s", day, exc)
-            return found
-    else:
-        return found
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{_RACING_API_BASE}/racecards/free",
+                params={"day": day},
+                auth=auth,
+            )
 
+        if resp.status_code == 429:
+            logger.warning("Racing API rate limited on %s — daily quota likely exhausted", day)
+            return [], True
+
+        resp.raise_for_status()
+        data = resp.json()
+
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 429:
+            logger.warning("Racing API rate limited on %s (caught via raise_for_status)", day)
+            return [], True
+        logger.warning("Racing API HTTP error on %s: %s", day, exc)
+        return [], False
+    except Exception as exc:
+        logger.warning("Racing API racecard fetch (%s) failed: %s", day, exc)
+        return [], False
+
+    found = []
     for race in data.get("racecards", []):
         for runner in race.get("runners", []):
             normalized = _normalize_horse_name(runner.get("horse", ""))
@@ -230,7 +232,7 @@ async def _fetch_racecard_entries(day: str, auth: httpx.BasicAuth) -> list[dict]
                     "jockey": runner.get("jockey", ""),
                     "form": runner.get("form", ""),
                 })
-    return found
+    return found, False
 
 
 async def fetch_all_horse_items() -> dict[str, list[dict]]:
@@ -253,13 +255,22 @@ async def fetch_all_horse_items() -> dict[str, list[dict]]:
         return result
 
     # Sequential — free plan is rate-limited to 1 req/s
-    today_entries = await _fetch_racecard_entries("today", auth)
+    today_entries, today_limited = await _fetch_racecard_entries("today", auth)
+    if today_limited:
+        _set_cache("horse_entries", {"_rate_limited": True})
+        return {"_rate_limited": True}  # type: ignore[return-value]
+
     await asyncio.sleep(1.1)
-    tomorrow_entries = await _fetch_racecard_entries("tomorrow", auth)
+    tomorrow_entries, tomorrow_limited = await _fetch_racecard_entries("tomorrow", auth)
+    if tomorrow_limited:
+        # Still use today's data if we have it
+        for entry in today_entries:
+            result.setdefault(entry["horse_key"], []).append(entry)
+        _set_cache("horse_entries", result)
+        return result
 
     for entry in today_entries + tomorrow_entries:
-        key = entry["horse_key"]
-        result.setdefault(key, []).append(entry)
+        result.setdefault(entry["horse_key"], []).append(entry)
 
     logger.info(
         "Racing API: found %d entries for %d horse(s) across today/tomorrow",

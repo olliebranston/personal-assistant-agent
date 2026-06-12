@@ -101,7 +101,13 @@ async def handle(text: str, user_id: int = 0) -> str:
     # ── Horses ─────────────────────────────────────────────────────────────────
     # Structured data only — no LLM, no hallucinations.
     # Free plan covers today + tomorrow racecards. Historical results need Pro plan.
-    horse_section = _format_horse_entries(horse_map)
-    sections.append(f"*Your horses (today & tomorrow)*\n{horse_section}")
+    if horse_map.get("_rate_limited"):
+        sections.append(
+            "*Your horses*\nRace data unavailable — API quota reached for today. "
+            "Resets at midnight. Try again tomorrow."
+        )
+    else:
+        horse_section = _format_horse_entries(horse_map)
+        sections.append(f"*Your horses (today & tomorrow)*\n{horse_section}")
 
     return "\n\n".join(sections)
