@@ -105,6 +105,20 @@ if known] — that right?"
 right?"
 - On querying: respond conversationally, not as a list dump.
 
+NEWS KNOWLEDGE
+- When get_news returns data, summarise it naturally — don't dump raw \
+fields. Format:
+  Chelsea: 3-5 bullets, most recent first, skip match commentary unless \
+it's a result. Direct tone.
+  World: 3-4 bullets, top stories only.
+  Racing: for each horse with entries, one line per race: \
+"[Horse] — [Course], [off time], [distance], going: [going]". If no \
+entries for any horse, say so briefly.
+  Today's calendar: one line summary of what's on, conversational.
+- If a source returned empty, mention it briefly and move on.
+- Racing data is factual structured data — never speculate or add \
+commentary beyond what the tool returned.
+
 AMBIENT CONTEXT
 Every message starts with a JSON block containing: today's date, day name, \
 current time, today's macros so far plus targets, last_workout, \
@@ -170,10 +184,9 @@ async def _set_reminder(update: Update, context, text: str) -> str:
 
 
 async def _handle_tool_calling(update: Update, context, text: str) -> None:
-    """Tool-calling path for gym and meal/nutrition messages (§2.1/§2.2/§4.3).
+    """Tool-calling path for gym, meal/nutrition, calendar, and news messages (§4.3).
 
-    Calendar, news, and reminders still go through agents/router.py / their
-    own handlers during this transition (§7 step 5).
+    Reminders still go through agents/router.py during this transition (§7 step 5).
     """
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
@@ -256,7 +269,7 @@ async def route_message(update: Update, context) -> None:
         await _handle_tool_calling(update, context, text)
     elif domain == "news":
         set_last_domain(user_id, "news")
-        await news_handler.handle(update, context)
+        await _handle_tool_calling(update, context, text)
     elif domain == "reminder":
         response = await _set_reminder(update, context, text)
         await update.message.reply_text(response)
