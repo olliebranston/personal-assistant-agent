@@ -101,37 +101,50 @@ def list_events(service, time_min: str, time_max: str, max_results: int = 15) ->
     return unique[:max_results]
 
 
-def create_event(service, summary: str, start: str, end: str, location: str = "") -> dict:
-    """Create a timed event on the first available preferred calendar.
+def create_event(
+    service,
+    summary: str,
+    start: str,
+    end: str,
+    location: str = "",
+    all_day: bool = False,
+) -> dict:
+    """Create an event on the first available preferred calendar.
 
     Calendar priority: Social → Personal → primary.
-    start / end: ISO 8601 datetime strings without offset, e.g. '2024-01-15T19:00:00'.
-    The Europe/London timezone is applied server-side so BST/GMT is handled correctly.
-    Returns the created event resource dict from the API.
-    """
-    calendar_id = _find_calendar_id(service, _WRITE_PREFERENCE)
 
-    body: dict = {
-        "summary": summary,
-        "start": {"dateTime": start, "timeZone": _TZ},
-        "end": {"dateTime": end, "timeZone": _TZ},
-    }
+    If all_day is False, start/end are ISO 8601 datetime strings without
+    offset (e.g. '2024-01-15T19:00:00') and the Europe/London timezone is
+    applied server-side so BST/GMT is handled correctly. If all_day is True,
+    start/end are date-only strings ('YYYY-MM-DD').
+
+    Returns {"event": <created event resource from the API>, "calendar": <calendar name>}.
+    """
+    calendar_id, calendar_name = _find_calendar_id(service, _WRITE_PREFERENCE)
+
+    body: dict = {"summary": summary}
+    if all_day:
+        body["start"] = {"date": start}
+        body["end"] = {"date": end}
+    else:
+        body["start"] = {"dateTime": start, "timeZone": _TZ}
+        body["end"] = {"dateTime": end, "timeZone": _TZ}
     if location:
         body["location"] = location
 
     event = service.events().insert(calendarId=calendar_id, body=body).execute()
     logger.info("Event '%s' created on calendar '%s' (id: %s)", summary, calendar_id, event.get("id"))
-    return event
+    return {"event": event, "calendar": calendar_name}
 
 
-def _find_calendar_id(service, preferred_names: list[str]) -> str:
-    """Return the ID of the first calendar matching a preferred name, else 'primary'."""
+def _find_calendar_id(service, preferred_names: list[str]) -> tuple[str, str]:
+    """Return (id, name) of the first calendar matching a preferred name, else ('primary', 'primary')."""
     try:
         items = service.calendarList().list().execute().get("items", [])
         for name in preferred_names:
             for cal in items:
                 if cal.get("summary", "").strip().lower() == name.lower():
-                    return cal["id"]
+                    return cal["id"], cal.get("summary", cal["id"])
     except Exception as exc:
         logger.warning("Calendar list lookup failed: %s. Using primary.", exc)
-    return "primary"
+    return "primary", "primary"

@@ -18,7 +18,7 @@ import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
-from tools import gym, meal
+from tools import calendar, gym, meal
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ def build_tool_registry(
     chat_id: int | None = None,
 ) -> ToolRegistry:
     """Build a per-request tool registry bound to this connection/context."""
-    schemas = [*gym.TOOL_SCHEMAS, *meal.TOOL_SCHEMAS]
+    schemas = [*gym.TOOL_SCHEMAS, *meal.TOOL_SCHEMAS, *calendar.TOOL_SCHEMAS]
 
     dispatch: dict[str, ToolFunc] = {
         "log_exercise": functools.partial(gym.log_exercise, conn),
@@ -69,6 +69,8 @@ def build_tool_registry(
         "generate_meal_plan": functools.partial(meal.generate_meal_plan, conn),
         "log_weight": functools.partial(meal.log_weight, conn),
         "get_weight_trend": functools.partial(meal.get_weight_trend, conn),
+        "get_calendar_events": functools.partial(calendar.get_calendar_events, conn),
+        "create_calendar_event": functools.partial(calendar.create_calendar_event, conn),
     }
 
     return ToolRegistry(schemas=schemas, dispatch=dispatch)
