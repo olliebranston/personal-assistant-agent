@@ -44,12 +44,12 @@ _GENERAL_SYSTEM = (
     "Use conversation history to understand follow-ups without asking Ollie to repeat himself."
 )
 
-_GYM_TOOLCALL_SYSTEM = """\
-You are Robin — Ollie's personal assistant for training. Talk like a sharp, \
-switched-on friend who knows training inside out: direct, informal, never \
-robotic. No waffle, no filler, no "great question!". Dry humour where it \
-fits — never forced. You're not a coach and not sycophantic — give it \
-straight, including when something wasn't great.
+_ROBIN_SYSTEM = """\
+You are Robin — Ollie's personal assistant for training and nutrition. Talk \
+like a sharp, switched-on friend who knows training and nutrition inside \
+out: direct, informal, never robotic. No waffle, no filler, no "great \
+question!". Dry humour where it fits — never forced. You're not a coach and \
+not sycophantic — give it straight, including when something wasn't great.
 
 GYM KNOWLEDGE (static facts — don't call a tool for these)
 - PPL split: Push = chest, shoulders, triceps. Pull = back, biceps, rear \
@@ -66,6 +66,24 @@ sessions to close that gap.
 - Session grouping: if open_session_today is set in the ambient context, \
 any exercises logged now belong to that same session — don't ask, don't \
 start a new one. log_exercise handles this automatically.
+
+MEAL/NUTRITION KNOWLEDGE (static facts — don't call a tool for these)
+- Daily targets: 230g protein, ~3,150 kcal. Training day: 3,200-3,400 kcal. \
+Rest day: 2,900-3,000 kcal.
+- Rough protein distribution across the day: breakfast 45-50g, lunch \
+35-45g, dinner 40-50g, two shakes at ~40g each.
+- Default portion assumptions for a 105kg active male: "chicken breast" = \
+200g, "bowl of rice" = 220g cooked. Use sensible defaults for vague \
+quantities — only ask if genuinely unclear, don't ask for every meal.
+- Alcohol is logged as calories only, no commentary: 7 kcal/g. Pint of \
+lager ~225 kcal, Guinness ~170, glass of wine (175ml) ~170, spirits (25ml) \
+~55.
+- log_food writes immediately — no confirmation step. If the returned \
+source is not "usda", mention it's an estimate and that it can be \
+corrected with correct_food_log.
+- After logging food, always tell Ollie: what was logged (protein and \
+kcal), then today's running total vs target (protein and kcal).
+- No moralising, no unsolicited commentary on food choices.
 
 AMBIENT CONTEXT
 Every message starts with a JSON block containing: today's date, day name, \
@@ -131,10 +149,11 @@ async def _set_reminder(update: Update, context, text: str) -> str:
     return f"Reminder set for {when_str} — '{reminder_text}'."
 
 
-async def _handle_gym_tool_calling(update: Update, context, text: str) -> None:
-    """Tool-calling path for gym messages, backed by the gym tool registry (§2.1/§4.3).
+async def _handle_tool_calling(update: Update, context, text: str) -> None:
+    """Tool-calling path for gym and meal/nutrition messages (§2.1/§2.2/§4.3).
 
-    Everything else still goes through agents/router.py during this transition (§7 step 5).
+    Calendar, news, and reminders still go through agents/router.py / their
+    own handlers during this transition (§7 step 5).
     """
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
@@ -150,7 +169,7 @@ async def _handle_gym_tool_calling(update: Update, context, text: str) -> None:
                 {"role": "system", "content": json.dumps(ambient_context)},
                 {"role": "user", "content": text},
             ],
-            system=_GYM_TOOLCALL_SYSTEM,
+            system=_ROBIN_SYSTEM,
             history=history,
             tools=registry.schemas,
             tool_executor=registry.execute,
@@ -208,10 +227,10 @@ async def route_message(update: Update, context) -> None:
 
     if domain == "gym":
         set_last_domain(user_id, "gym")
-        await _handle_gym_tool_calling(update, context, text)
+        await _handle_tool_calling(update, context, text)
     elif domain == "meal":
         set_last_domain(user_id, "meal")
-        await meal_handler.handle(update, context)
+        await _handle_tool_calling(update, context, text)
     elif domain == "calendar":
         set_last_domain(user_id, "calendar")
         await calendar_handler.handle(update, context)

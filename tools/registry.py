@@ -18,7 +18,7 @@ import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
-from tools import gym
+from tools import gym, meal
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ def build_tool_registry(
     chat_id: int | None = None,
 ) -> ToolRegistry:
     """Build a per-request tool registry bound to this connection/context."""
-    schemas = [*gym.TOOL_SCHEMAS]
+    schemas = [*gym.TOOL_SCHEMAS, *meal.TOOL_SCHEMAS]
 
     dispatch: dict[str, ToolFunc] = {
         "log_exercise": functools.partial(gym.log_exercise, conn),
@@ -59,6 +59,16 @@ def build_tool_registry(
         "get_next_session_type": functools.partial(gym.get_next_session_type, conn),
         "get_session_plan": functools.partial(gym.get_session_plan, conn),
         "get_weekly_gym_summary": functools.partial(gym.get_weekly_gym_summary, conn),
+        "log_food": functools.partial(meal.log_food, conn),
+        "correct_food_log": functools.partial(meal.correct_food_log, conn),
+        "get_food_log": functools.partial(meal.get_food_log, conn),
+        "get_daily_macros": functools.partial(meal.get_daily_macros, conn),
+        "get_weekly_macro_summary": functools.partial(meal.get_weekly_macro_summary, conn),
+        "get_recipe": functools.partial(meal.get_recipe, conn),
+        "suggest_meal": functools.partial(meal.suggest_meal, conn),
+        "generate_meal_plan": functools.partial(meal.generate_meal_plan, conn),
+        "log_weight": functools.partial(meal.log_weight, conn),
+        "get_weight_trend": functools.partial(meal.get_weight_trend, conn),
     }
 
     return ToolRegistry(schemas=schemas, dispatch=dispatch)
