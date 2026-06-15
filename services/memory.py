@@ -1,10 +1,10 @@
-"""Rolling 6-message conversation memory per user — in-memory, not persisted across restarts."""
+"""Rolling 10-message conversation memory per user — in-memory, not persisted across restarts."""
 
 from __future__ import annotations
 
 from collections import deque
 
-_MAX_MESSAGES = 6  # 3 full exchanges (user + assistant)
+_MAX_MESSAGES = 10  # 5 full exchanges (user + assistant) — §3.1 of TOOL_CALLING_DESIGN.md
 _store: dict[int, deque[dict]] = {}
 
 

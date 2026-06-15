@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from collections.abc import Awaitable, Callable
 
+import httpx
 import openai
 from openai import AsyncOpenAI
 
@@ -21,49 +24,29 @@ _client = AsyncOpenAI(
     },
 )
 
+ToolExecutor = Callable[[str, dict], Awaitable[dict]]
 
-async def complete(
-    messages: list[dict],
-    system: str = "",
-    history: list[dict] | None = None,
-    max_attempts: int = 3,
-) -> str:
-    """Send a chat completion to OpenRouter and return the response text.
 
-    Args:
-        messages:     The current turn's messages as OpenAI-format dicts.
-        system:       Optional system prompt prepended to the conversation.
-        history:      Prior conversation turns (from services.memory) for context.
-        max_attempts: Retry attempts on API failure with exponential backoff.
+async def _call_api(messages: list[dict], tools: list[dict] | None, max_attempts: int):
+    """Make one chat completion call, retrying on openai.APIError with backoff.
 
-    Returns:
-        The model's reply as a plain string.
-
-    Raises:
-        openai.APIError after max_attempts failures — handlers catch this and
-        return a friendly error message to Ollie rather than crashing.
+    Returns the response message object (has .content and .tool_calls).
+    Raises the last openai.APIError after max_attempts failures.
     """
-    full_messages: list[dict] = []
-    if system:
-        full_messages.append({"role": "system", "content": system})
-    if history:
-        full_messages.extend(history)
-    full_messages.extend(messages)
-
     last_exc: Exception | None = None
     for attempt in range(max_attempts):
         try:
-            response = await _client.chat.completions.create(
-                model=config.OPENROUTER_MODEL,
-                messages=full_messages,
-            )
+            kwargs: dict = {"model": config.OPENROUTER_MODEL, "messages": messages}
+            if tools:
+                kwargs["tools"] = tools
+            response = await _client.chat.completions.create(**kwargs)
             if not response.choices:
                 raise openai.APIError(
                     f"OpenRouter returned empty choices (model: {config.OPENROUTER_MODEL})",
-                    response=response,
+                    request=httpx.Request("POST", config.OPENROUTER_BASE_URL),
                     body=None,
                 )
-            return response.choices[0].message.content
+            return response.choices[0].message
         except openai.APIError as exc:
             last_exc = exc
             if attempt < max_attempts - 1:
@@ -75,3 +58,88 @@ async def complete(
                 await asyncio.sleep(wait)
 
     raise last_exc  # type: ignore[misc]
+
+
+async def complete(
+    messages: list[dict],
+    system: str = "",
+    history: list[dict] | None = None,
+    tools: list[dict] | None = None,
+    tool_executor: ToolExecutor | None = None,
+    max_attempts: int = 3,
+    max_tool_iterations: int = 5,
+) -> str:
+    """Send a chat completion to OpenRouter and return the response text.
+
+    Args:
+        messages:            The current turn's messages as OpenAI-format dicts.
+        system:              Optional system prompt prepended to the conversation.
+        history:             Prior conversation turns (from services.memory) for context.
+        tools:               Optional OpenAI-format tool schemas. If None, behaviour is
+                              identical to a plain chat completion (no tool-call loop).
+        tool_executor:       Required if `tools` is set. Async callable
+                              (tool_name, args) -> dict, invoked for each tool call the
+                              model makes. Must not raise — any exception is caught and
+                              converted to {"error": str(exc)} so one broken tool can't
+                              crash the turn.
+        max_attempts:        Retry attempts per API call on failure with exponential backoff.
+        max_tool_iterations: Safety cap on the tool-call loop (only used when `tools` is set).
+
+    Returns:
+        The model's final reply as a plain string.
+
+    Raises:
+        openai.APIError after max_attempts failures on any single API call — handlers
+        catch this and return a friendly error message to Ollie rather than crashing.
+    """
+    full_messages: list[dict] = []
+    if system:
+        full_messages.append({"role": "system", "content": system})
+    if history:
+        full_messages.extend(history)
+    full_messages.extend(messages)
+
+    if not tools:
+        message = await _call_api(full_messages, None, max_attempts)
+        return message.content
+
+    message = None
+    for _ in range(max_tool_iterations):
+        message = await _call_api(full_messages, tools, max_attempts)
+
+        if not message.tool_calls:
+            return message.content
+
+        full_messages.append({
+            "role": "assistant",
+            "content": message.content,
+            "tool_calls": [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.function.name,
+                        "arguments": call.function.arguments,
+                    },
+                }
+                for call in message.tool_calls
+            ],
+        })
+
+        for call in message.tool_calls:
+            logger.debug("Tool call: %s(%s)", call.function.name, call.function.arguments)
+            try:
+                args = json.loads(call.function.arguments)
+                result = await tool_executor(call.function.name, args)
+            except Exception as exc:
+                logger.warning("Tool '%s' failed: %s", call.function.name, exc)
+                result = {"error": str(exc)}
+
+            full_messages.append({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": json.dumps(result),
+            })
+
+    logger.warning("Tool loop exceeded %d iterations", max_tool_iterations)
+    return message.content or "Sorry, I got stuck working on that — try rephrasing."

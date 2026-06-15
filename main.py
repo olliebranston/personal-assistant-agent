@@ -1,5 +1,7 @@
 """Entry point. Initialises the database, registers handlers, and starts polling."""
 
+import asyncio
+import json
 import logging
 import re
 from datetime import datetime
@@ -20,7 +22,9 @@ from bot.handlers import news as news_handler
 from bot.scheduler import register_jobs
 from services import memory
 from services.openrouter import complete
-from storage.db import init_db
+from storage.db import get_connection, init_db
+from tools.context import build_ambient_context
+from tools.registry import build_tool_registry
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -39,6 +43,40 @@ _GENERAL_SYSTEM = (
     "Answer what's asked. One or two sentences is usually enough. "
     "Use conversation history to understand follow-ups without asking Ollie to repeat himself."
 )
+
+_GYM_TOOLCALL_SYSTEM = """\
+You are Robin — Ollie's personal assistant for training. Talk like a sharp, \
+switched-on friend who knows training inside out: direct, informal, never \
+robotic. No waffle, no filler, no "great question!". Dry humour where it \
+fits — never forced. You're not a coach and not sycophantic — give it \
+straight, including when something wasn't great.
+
+GYM KNOWLEDGE (static facts — don't call a tool for these)
+- PPL split: Push = chest, shoulders, triceps. Pull = back, biceps, rear \
+delts. Legs = quads, hamstrings, glutes, calves.
+- Exercise -> session type: bench press, OHP, dips, flyes -> push. Rows, \
+pull-ups, curls, face pulls -> pull. Squats, RDLs, lunges, leg press -> legs.
+- Progression rule: aim for +2.5kg or +1 rep versus the last session for \
+that exercise. If the notes show the target was failed or missed last \
+time, hold the same weight/reps instead of pushing on. Compounds before \
+isolation.
+- Run target: 20:00 for 5k (currently ~27 mins). Suggest interval or tempo \
+sessions to close that gap.
+- Bodyweight exercises: pass weight_kg=null to log_exercise.
+- Session grouping: if open_session_today is set in the ambient context, \
+any exercises logged now belong to that same session — don't ask, don't \
+start a new one. log_exercise handles this automatically.
+
+AMBIENT CONTEXT
+Every message starts with a JSON block containing: today's date, day name, \
+current time, today's macros so far plus targets, last_workout, \
+open_session_today, and latest_weight_kg. Use these facts directly — don't \
+call a tool to re-fetch something already in that block.
+
+Use conversation history to understand follow-ups without asking Ollie to \
+repeat himself. Answer what's asked — one or two sentences is usually \
+enough.\
+"""
 
 _REMINDER_SYSTEM = """\
 Extract the reminder from the user's message. Reply ONLY with valid JSON — no prose.
@@ -93,6 +131,38 @@ async def _set_reminder(update: Update, context, text: str) -> str:
     return f"Reminder set for {when_str} — '{reminder_text}'."
 
 
+async def _handle_gym_tool_calling(update: Update, context, text: str) -> None:
+    """Tool-calling path for gym messages, backed by the gym tool registry (§2.1/§4.3).
+
+    Everything else still goes through agents/router.py during this transition (§7 step 5).
+    """
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+
+    conn = get_connection()
+    try:
+        ambient_context = build_ambient_context(conn)
+        history = memory.get(user_id)
+        registry = build_tool_registry(conn, context, chat_id)
+
+        reply = await complete(
+            messages=[
+                {"role": "system", "content": json.dumps(ambient_context)},
+                {"role": "user", "content": text},
+            ],
+            system=_GYM_TOOLCALL_SYSTEM,
+            history=history,
+            tools=registry.schemas,
+            tool_executor=registry.execute,
+        )
+    finally:
+        conn.close()
+
+    memory.add(user_id, "user", text)
+    memory.add(user_id, "assistant", reply)
+    await update.message.reply_text(reply)
+
+
 async def _general_response(user_id: int, text: str) -> str:
     hist = memory.get(user_id)
     try:
@@ -138,7 +208,7 @@ async def route_message(update: Update, context) -> None:
 
     if domain == "gym":
         set_last_domain(user_id, "gym")
-        await gym_handler.handle(update, context)
+        await _handle_gym_tool_calling(update, context, text)
     elif domain == "meal":
         set_last_domain(user_id, "meal")
         await meal_handler.handle(update, context)
@@ -163,6 +233,13 @@ async def error_handler(update: object, context) -> None:
 def main() -> None:
     init_db()
     logger.info("Database ready.")
+
+    # Python 3.14 removed get_event_loop()'s implicit loop creation, which
+    # PTB 21.x's run_polling() still relies on — set one up explicitly.
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
 

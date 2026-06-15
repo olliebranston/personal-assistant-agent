@@ -26,3 +26,6 @@ build/
 # Test caches
 .pytest_cache/
 .coverage
+
+# Scratch / spike scripts — not part of the application
+scratch/

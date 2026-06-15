@@ -176,11 +176,21 @@ def _get_chelsea_headline() -> str | None:
         return None
 
 
+async def _get_world_headlines(limit: int = 3) -> list[str]:
+    """Return up to `limit` top BBC World headlines. Returns [] on any failure."""
+    try:
+        items = await news_svc.fetch_world_news_items()
+        return [f"• {item['title']}" for item in items[:limit]]
+    except Exception as exc:
+        logger.debug("World news fetch for morning briefing failed: %s", exc)
+        return []
+
+
 # ── Job callbacks ─────────────────────────────────────────────────────────────
 
 
 async def _morning_briefing(context) -> None:
-    """7:45 AM daily: smart morning brief — calendar, training targets, horses, breakfast."""
+    """7:45 AM daily: smart morning brief — calendar, training targets, horses, news, breakfast."""
     today = datetime.date.today()
     weekday = today.weekday()
     day_name = today.strftime("%A")
@@ -211,6 +221,12 @@ async def _morning_briefing(context) -> None:
         chelsea = _get_chelsea_headline()
         if chelsea:
             sections.append(f"\nCHELSEA\n• {chelsea}")
+
+        # World news headlines
+        world_headlines = await _get_world_headlines()
+        if world_headlines:
+            sections.append("\nWORLD NEWS")
+            sections.extend(world_headlines)
 
         # Breakfast — on Tue/Wed/Thu offer to repeat yesterday's if logged
         if weekday in (1, 2, 3):  # Tue, Wed, Thu
@@ -345,12 +361,12 @@ def register_jobs(app: Application) -> None:
     jq.run_daily(
         _midmorning_checkin,
         time=datetime.time(10, 30, tzinfo=_TZ),
-        days=(0, 1, 2, 3, 4),  # weekdays only
+        days=(1, 2, 3, 4, 5),  # weekdays only (PTB: 0=Sun..6=Sat)
     )
     jq.run_daily(
         _lunch_prompt,
         time=datetime.time(12, 30, tzinfo=_TZ),
-        days=(1, 2, 3),  # Tue, Wed, Thu only
+        days=(2, 3, 4),  # Tue, Wed, Thu only (PTB: 0=Sun..6=Sat)
     )
     jq.run_daily(
         _evening_dinner_prompt,
@@ -363,15 +379,15 @@ def register_jobs(app: Application) -> None:
     jq.run_daily(
         _friday_meal_plan,
         time=datetime.time(17, 0, tzinfo=_TZ),
-        days=(4,),  # Friday
+        days=(5,),  # Friday (PTB: 0=Sun..6=Sat)
     )
     jq.run_daily(
         _sunday_batch_cook,
         time=datetime.time(10, 0, tzinfo=_TZ),
-        days=(6,),  # Sunday
+        days=(0,),  # Sunday (PTB: 0=Sun..6=Sat)
     )
 
     logger.info(
-        "Jobs registered: morning 07:45, mid-morning 10:30 (weekdays), "
+        "Jobs registered: morning 07:45, mid-morning 10:30 (Mon-Fri), "
         "lunch prompt 12:30 (Tue-Thu), evening 21:00, EOD 23:00, Friday 17:00, Sunday 10:00"
     )
