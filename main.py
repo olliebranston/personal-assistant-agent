@@ -3,18 +3,13 @@
 import asyncio
 import json
 import logging
-import re
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 import config
-import services.state as state_svc
 from utils import log_scrubber
-from agents.router import classify, set_last_domain
 from bot.handlers import calendar as calendar_handler
 from bot.handlers import gym as gym_handler
 from bot.handlers import meal as meal_handler
@@ -32,17 +27,6 @@ logging.basicConfig(
 )
 log_scrubber.install()
 logger = logging.getLogger(__name__)
-
-_TZ = ZoneInfo("Europe/London")
-
-_GENERAL_SYSTEM = (
-    "You are Robin — Ollie's personal assistant. "
-    "Talk like a sharp, switched-on friend who knows training, nutrition, scheduling, and sports inside out. "
-    "Direct, informal, never robotic. No waffle, no filler, no 'great question!'. "
-    "Dry humour where it fits — never forced. "
-    "Answer what's asked. One or two sentences is usually enough. "
-    "Use conversation history to understand follow-ups without asking Ollie to repeat himself."
-)
 
 _ROBIN_SYSTEM = """\
 You are Robin — Ollie's personal assistant for training, nutrition, and his \
@@ -119,6 +103,15 @@ entries for any horse, say so briefly.
 - Racing data is factual structured data — never speculate or add \
 commentary beyond what the tool returned.
 
+REMINDERS
+- Parse the time from Ollie's message directly using current_time and \
+today's date from ambient context. Pass an absolute ISO 8601 datetime \
+as the 'when' argument (e.g. '2026-06-17T15:00:00'). Resolve relative \
+expressions yourself: "in 2 hours" → now + 2h, "at 3pm" → today at \
+15:00 (or tomorrow if already past), "tomorrow morning" → tomorrow 08:00.
+- If the requested time has already passed, tell Ollie directly — do \
+not call create_reminder.
+
 AMBIENT CONTEXT
 Every message starts with a JSON block containing: today's date, day name, \
 current time, today's macros so far plus targets, last_workout, \
@@ -130,64 +123,8 @@ repeat himself. Answer what's asked — one or two sentences is usually \
 enough.\
 """
 
-_REMINDER_SYSTEM = """\
-Extract the reminder from the user's message. Reply ONLY with valid JSON — no prose.
-
-Current London time: {now}
-
-{{"text": "<what to remind about>", "datetime": "<ISO 8601 datetime, e.g. 2026-06-13T14:00:00>"}}
-
-Rules:
-- "in 2 hours" → now + 2 hours
-- "tomorrow morning" → tomorrow at 08:00
-- "at 3pm" → today at 15:00 (or tomorrow if 3pm has passed)
-- "tomorrow at X" → tomorrow at X
-- text should be concise: "call dentist", "check the laundry", "take medication"
-"""
-
-
-async def _set_reminder(update: Update, context, text: str) -> str:
-    """Parse a reminder request and schedule a one-off job."""
-    now = datetime.now(tz=_TZ)
-    system = _REMINDER_SYSTEM.format(now=now.isoformat())
-
-    raw = await complete([{"role": "user", "content": text}], system=system)
-
-    try:
-        import json
-        parsed = json.loads(re.search(r"\{.*\}", raw, re.DOTALL).group())
-        reminder_text = parsed["text"]
-        reminder_dt = datetime.fromisoformat(parsed["datetime"])
-        if reminder_dt.tzinfo is None:
-            reminder_dt = reminder_dt.replace(tzinfo=_TZ)
-    except Exception as exc:
-        logger.warning("Reminder parse failed: %s — raw: %s", exc, raw)
-        return "Couldn't parse that reminder. Try: 'remind me at 3pm to call the dentist'"
-
-    if reminder_dt <= now:
-        return "That time has already passed. Give me a future time."
-
-    delay = (reminder_dt - now).total_seconds()
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-
-    async def _fire_reminder(ctx):
-        await ctx.bot.send_message(chat_id=chat_id, text=f"Reminder: {reminder_text}")
-
-    context.job_queue.run_once(_fire_reminder, when=delay)
-
-    time_str = reminder_dt.strftime("%H:%M")
-    date_str = reminder_dt.strftime("%a %d %b")
-    today_str = now.strftime("%a %d %b")
-    when_str = f"today at {time_str}" if date_str == today_str else f"{date_str} at {time_str}"
-    return f"Reminder set for {when_str} — '{reminder_text}'."
-
-
 async def _handle_tool_calling(update: Update, context, text: str) -> None:
-    """Tool-calling path for gym, meal/nutrition, calendar, and news messages (§4.3).
-
-    Reminders still go through agents/router.py during this transition (§7 step 5).
-    """
+    """Unified tool-calling path for all message domains (§4.3)."""
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
 
@@ -215,23 +152,6 @@ async def _handle_tool_calling(update: Update, context, text: str) -> None:
     await update.message.reply_text(reply)
 
 
-async def _general_response(user_id: int, text: str) -> str:
-    hist = memory.get(user_id)
-    try:
-        response = await complete(
-            [{"role": "user", "content": text}],
-            system=_GENERAL_SYSTEM,
-            history=hist,
-        )
-    except Exception as exc:
-        logger.error("General response failed: %s", exc)
-        return "Something went wrong on my end — try again."
-
-    memory.add(user_id, "user", text)
-    memory.add(user_id, "assistant", response)
-    return response
-
-
 async def route_message(update: Update, context) -> None:
     user_id = update.effective_user.id
     if user_id != config.TELEGRAM_ALLOWED_USER_ID:
@@ -242,40 +162,7 @@ async def route_message(update: Update, context) -> None:
         return
 
     await update.effective_chat.send_action(ChatAction.TYPING)
-
-    pending = state_svc.get(user_id)
-    if pending:
-        if pending.get("type") == "food_log":
-            await meal_handler.handle(update, context)
-            return
-        if pending.get("type") == "session_offered":
-            await gym_handler.handle(update, context)
-            return
-        if pending.get("type") == "event_create":
-            await calendar_handler.handle(update, context)
-            return
-
-    domain = await classify(text, user_id=user_id)
-    logger.info("Routed '%s' → %s", text[:60], domain)
-
-    if domain == "gym":
-        set_last_domain(user_id, "gym")
-        await _handle_tool_calling(update, context, text)
-    elif domain == "meal":
-        set_last_domain(user_id, "meal")
-        await _handle_tool_calling(update, context, text)
-    elif domain == "calendar":
-        set_last_domain(user_id, "calendar")
-        await _handle_tool_calling(update, context, text)
-    elif domain == "news":
-        set_last_domain(user_id, "news")
-        await _handle_tool_calling(update, context, text)
-    elif domain == "reminder":
-        response = await _set_reminder(update, context, text)
-        await update.message.reply_text(response)
-    else:
-        response = await _general_response(user_id, text)
-        await update.message.reply_text(response)
+    await _handle_tool_calling(update, context, text)
 
 
 async def error_handler(update: object, context) -> None:
