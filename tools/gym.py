@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+_TZ = ZoneInfo("Europe/London")
 
 from storage.models import (
     ExerciseSet,
@@ -88,12 +91,17 @@ async def log_exercise(
 ) -> dict:
     """Log one exercise, appending to today's session or creating a new one (§3.2d)."""
     try:
-        today = date.today().isoformat()
-        recent = get_recent_sessions(conn, limit=1)
+        today = datetime.now(tz=_TZ).date().isoformat()
 
-        if recent and recent[0]["date"] == today:
-            session_id = recent[0]["id"]
-            resolved_type = recent[0]["session_type"]
+        # Query directly for today's date — any session_type is fine, always append
+        row = conn.execute(
+            "SELECT * FROM gym_sessions WHERE date = ? ORDER BY id DESC LIMIT 1",
+            (today,),
+        ).fetchone()
+
+        if row:
+            session_id = row["id"]
+            resolved_type = row["session_type"]
         else:
             resolved_type = session_type or _next_session_type(conn)
             session_id = insert_session(conn, GymSession(date=today, session_type=resolved_type))

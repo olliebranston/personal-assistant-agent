@@ -76,6 +76,26 @@ _FALLBACK: dict[str, tuple[float, float]] = {
 }
 
 
+def _pre_lookup(query: str) -> tuple[float, float] | None:
+    """Rule-based override that runs BEFORE the USDA API for common foods with frequent
+    API mismatches. Returns (protein_per_100g, kcal_per_100g) or None.
+    Rules are checked in order — more specific rules must come first."""
+    q = query.lower().strip()
+    if "oat" in q and "milk" not in q and "flour" not in q:
+        return (13.0, 389.0)
+    if "greek yog" in q:
+        return (10.0, 59.0)
+    if "egg" in q and "white" not in q and "noodle" not in q and "fried" not in q and "pasta" not in q and "powder" not in q:
+        return (12.0, 140.0)
+    if "brown rice" in q:
+        return (2.6, 123.0)
+    if "rice" in q and "brown" not in q and "fried" not in q and "wild" not in q:
+        return (2.7, 130.0)
+    if "lentil" in q:
+        return (9.0, 116.0)
+    return None
+
+
 def _fallback_lookup(query: str) -> tuple[float, float] | None:
     """Check the hardcoded fallback table. Returns (protein_per_100g, kcal_per_100g) or None."""
     q = query.lower().strip()
@@ -145,6 +165,19 @@ async def lookup_macros(query: str, quantity_g: float) -> dict:
     Returns:
         {description, quantity_g, protein_g, kcal, source}
     """
+    pre = _pre_lookup(query)
+    if pre:
+        protein_per_100g, kcal_per_100g = pre
+        scale = quantity_g / 100.0
+        logger.info("Pre-lookup hit for '%s' — skipping USDA", query)
+        return {
+            "description": query,
+            "quantity_g": quantity_g,
+            "protein_g": round(protein_per_100g * scale, 1),
+            "kcal": round(kcal_per_100g * scale, 0),
+            "source": "reference",
+        }
+
     results = await search(query)
 
     if results:

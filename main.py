@@ -134,16 +134,24 @@ async def _handle_tool_calling(update: Update, context, text: str) -> None:
         history = memory.get(user_id)
         registry = build_tool_registry(conn, context, chat_id)
 
-        reply = await complete(
-            messages=[
-                {"role": "system", "content": json.dumps(ambient_context)},
-                {"role": "user", "content": text},
-            ],
-            system=_ROBIN_SYSTEM,
-            history=history,
-            tools=registry.schemas,
-            tool_executor=registry.execute,
-        )
+        try:
+            reply = await complete(
+                messages=[
+                    {"role": "system", "content": json.dumps(ambient_context)},
+                    {"role": "user", "content": text},
+                ],
+                system=_ROBIN_SYSTEM,
+                history=history,
+                tools=registry.schemas,
+                tool_executor=registry.execute,
+            )
+        except Exception as exc:
+            logger.error("LLM call failed in _handle_tool_calling: %s", exc, exc_info=True)
+            err = str(exc).lower()
+            if "429" in err or "rate" in err or "ratelimit" in err:
+                reply = "Hit the API rate limit — try again in a few hours."
+            else:
+                reply = "Something went wrong on my end — try again."
     finally:
         conn.close()
 
