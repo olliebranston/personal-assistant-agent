@@ -99,8 +99,9 @@ CHELSEA
 [3-5 bullet points, most recent first. If no news: 'Nothing fresh.']
 
 RACING
-[One line per horse with entries: '{Horse} — {Course}, {off_time}, \
-{distance}, going: {going}'. If no horses running: 'No entries today.']
+[Horses are pre-filtered to today's races only. One line per horse: \
+'{Horse} — {Course}, {off_time}, {distance}, going: {going}'. If no \
+horses running today: 'No entries today.']
 
 Tone: direct, informal, like a sharp friend who knows his routine. \
 No filler, no greetings, no sign-off. Dry humour only if it fits \

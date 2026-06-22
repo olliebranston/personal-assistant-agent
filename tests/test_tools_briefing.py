@@ -183,6 +183,45 @@ async def test_yesterday_nutrition_fetched_for_correct_date(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_horses_filtered_to_today_only(monkeypatch):
+    conn = _make_conn()
+
+    monkeypatch.setattr(briefing_module, "get_calendar_events", _async_return({"error": "calendar_unavailable"}))
+    monkeypatch.setattr(briefing_module, "get_news", _async_return({
+        "chelsea": [],
+        "world": [],
+        "horses": {
+            "rate_limited": False,
+            "entries": {
+                # Runs today AND tomorrow — only the today race should survive.
+                "Astrazar": [
+                    {"course": "Ascot", "day_label": "today", "off_time": "14:30",
+                     "distance": "1m2f", "going": "Good", "race_class": "Class 4"},
+                    {"course": "York", "day_label": "tomorrow", "off_time": "15:00",
+                     "distance": "1m", "going": "Soft", "race_class": "Class 3"},
+                ],
+                # Only racing tomorrow — should disappear entirely.
+                "Magnatura": [
+                    {"course": "Newmarket", "day_label": "tomorrow", "off_time": "13:00",
+                     "distance": "7f", "going": "Good", "race_class": "Class 2"},
+                ],
+            },
+        },
+        "today_calendar": [],
+    }))
+    monkeypatch.setattr(briefing_module, "get_next_session_type", _async_return({"session_type": "push", "cycle_position": "1/3"}))
+    monkeypatch.setattr(briefing_module, "get_last_session", _async_return({"found": False, "date": None, "session_type": "push", "exercises": []}))
+
+    result = await get_morning_briefing_data(conn)
+
+    entries = result["horses"]["entries"]
+    assert set(entries.keys()) == {"Astrazar"}
+    assert len(entries["Astrazar"]) == 1
+    assert entries["Astrazar"][0]["course"] == "Ascot"
+    assert "day_label" not in entries["Astrazar"][0]
+
+
+@pytest.mark.asyncio
 async def test_source_failure_returns_safe_defaults(monkeypatch):
     conn = _make_conn()
 

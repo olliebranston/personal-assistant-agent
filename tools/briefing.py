@@ -80,7 +80,12 @@ async def get_morning_briefing_data(conn: sqlite3.Connection) -> dict:
         horses = {
             "rate_limited": raw_horses.get("rate_limited", False),
             "entries": {
-                horse: [
+                horse: today_races
+                for horse, races in raw_horses.get("entries", {}).items()
+                # Morning briefing only ever shows races happening today —
+                # tomorrow's entries would be ambiguous without a date on
+                # the line, so they're dropped here rather than displayed.
+                if (today_races := [
                     {
                         "course": r.get("course", ""),
                         "off_time": r.get("off_time", ""),
@@ -89,8 +94,8 @@ async def get_morning_briefing_data(conn: sqlite3.Connection) -> dict:
                         "race_class": r.get("race_class", ""),
                     }
                     for r in races
-                ]
-                for horse, races in raw_horses.get("entries", {}).items()
+                    if r.get("day_label") == "today"
+                ])
             },
         }
     except Exception as exc:

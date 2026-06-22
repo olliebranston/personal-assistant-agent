@@ -26,6 +26,22 @@ logger = logging.getLogger(__name__)
 
 _PPL_CYCLE = ["push", "pull", "legs"]
 
+# Progressive-overload cycle: sets x reps advance through these four steps in
+# order, at a fixed weight, before the weight increases and the cycle resets.
+# e.g. 3x10 @ 66kg -> next is 4x8 @ 66kg; completing 4x10 @ 66kg -> next is
+# 3x8 @ 68.5kg.
+_PROGRESSION_CYCLE = [(3, 8), (3, 10), (4, 8), (4, 10)]
+_PROGRESSION_INCREMENT_KG = 2.5
+
+
+def _cycle_rank(sets: int, reps: int) -> int:
+    """Highest cycle step that (sets, reps) dominates (>= sets and >= reps), or -1."""
+    best = -1
+    for i, (s, r) in enumerate(_PROGRESSION_CYCLE):
+        if sets >= s and reps >= r:
+            best = i
+    return best
+
 # Structured session plans — target_sets/target_reps/notes per exercise.
 # Ported from agents/gym.py:_SESSION_PLANS (free text) into the structured
 # shape required by get_session_plan's return type (§2.1).
@@ -179,6 +195,58 @@ async def get_exercise_history(conn: sqlite3.Connection, exercise_name: str, lim
         return {"error": str(exc)}
 
 
+async def get_exercise_progression(conn: sqlite3.Connection, exercise_name: str) -> dict:
+    """Compute the next sets/reps/weight recommendation for one exercise.
+
+    Progression rule: sets x reps advance through 3x8 -> 3x10 -> 4x8 -> 4x10
+    at a fixed weight; completing 4x10 bumps weight by +2.5kg and resets to
+    3x8. The recommendation is always based on the most advanced (weight,
+    cycle-step) ever logged for this exercise — not just the last entry — so
+    a one-off lighter or lower-rep session doesn't regress the target. A
+    logged weight higher than any seen before immediately becomes the new
+    basis, restarting the cycle at that weight.
+    """
+    try:
+        rows = get_last_sets_for_exercise(conn, exercise_name, limit=100)
+        weighted = [r for r in rows if r.get("weight_kg") is not None]
+        if not weighted:
+            return {"exercise": exercise_name, "found": False}
+
+        best_row = None
+        best_key: tuple[float, int] | None = None
+        for row in weighted:
+            rank = _cycle_rank(row["sets"], row["reps"])
+            key = (row["weight_kg"], rank)
+            if best_key is None or key > best_key:
+                best_key = key
+                best_row = row
+
+        weight, rank = best_key
+        if rank >= len(_PROGRESSION_CYCLE) - 1:
+            next_weight = round(weight + _PROGRESSION_INCREMENT_KG, 2)
+            next_sets, next_reps = _PROGRESSION_CYCLE[0]
+        else:
+            next_weight = weight
+            next_sets, next_reps = _PROGRESSION_CYCLE[max(rank + 1, 0)]
+
+        return {
+            "exercise": exercise_name,
+            "found": True,
+            "basis": {
+                "date": best_row["date"],
+                "weight_kg": weight,
+                "sets": best_row["sets"],
+                "reps": best_row["reps"],
+            },
+            "recommended_weight_kg": next_weight,
+            "recommended_sets": next_sets,
+            "recommended_reps": next_reps,
+        }
+    except Exception as exc:
+        logger.warning("get_exercise_progression failed: %s", exc)
+        return {"error": str(exc)}
+
+
 async def get_next_session_type(conn: sqlite3.Connection) -> dict:
     """Return the next session type due in the push/pull/legs rotation."""
     try:
@@ -285,9 +353,9 @@ TOOL_SCHEMAS: list[dict] = [
             "description": (
                 "Get every exercise logged in the most recent session of a given type "
                 "(push/pull/legs/short/run), with weights, sets, reps and notes. Use this "
-                "to answer 'what did I do last push day' or to work out progression targets "
-                "(+2.5kg or +1 rep from last time, unless the notes show the lift was "
-                "failed/missed, in which case hold)."
+                "to answer 'what did I do last push day'. For progression targets on a "
+                "specific exercise, use get_exercise_progression instead — it computes the "
+                "next sets/reps/weight directly."
             ),
             "parameters": {
                 "type": "object",
@@ -321,6 +389,31 @@ TOOL_SCHEMAS: list[dict] = [
                     "limit": {
                         "type": "integer",
                         "description": "Max number of past entries to return. Defaults to 5.",
+                    },
+                },
+                "required": ["exercise_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_exercise_progression",
+            "description": (
+                "Get the next recommended sets/reps/weight for one specific exercise, "
+                "computed from logged history (not left to you to calculate). Call this "
+                "for EVERY exercise before telling Ollie his targets for today's session — "
+                "don't recommend weights from get_session_plan's static targets alone. "
+                "Also use it directly for 'what weight should I do on bench today'. Returns "
+                "found=false if the exercise has no weighted history yet (use the static "
+                "target from get_session_plan instead)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "exercise_name": {
+                        "type": "string",
+                        "description": "Exercise name, matching how it's logged, e.g. 'bench press'.",
                     },
                 },
                 "required": ["exercise_name"],

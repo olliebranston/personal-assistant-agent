@@ -6,14 +6,10 @@ import logging
 
 from telegram import Update
 from telegram.constants import ChatAction
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram.ext import Application, MessageHandler, filters
 
 import config
 from utils import log_scrubber
-from bot.handlers import calendar as calendar_handler
-from bot.handlers import gym as gym_handler
-from bot.handlers import meal as meal_handler
-from bot.handlers import news as news_handler
 from bot.scheduler import register_jobs
 from services import memory
 from services.openrouter import complete
@@ -41,10 +37,15 @@ GYM KNOWLEDGE (static facts — don't call a tool for these)
 delts. Legs = quads, hamstrings, glutes, calves.
 - Exercise -> session type: bench press, OHP, dips, flyes -> push. Rows, \
 pull-ups, curls, face pulls -> pull. Squats, RDLs, lunges, leg press -> legs.
-- Progression rule: aim for +2.5kg or +1 rep versus the last session for \
-that exercise. If the notes show the target was failed or missed last \
-time, hold the same weight/reps instead of pushing on. Compounds before \
-isolation.
+- Progression rule: sets x reps advance through a fixed 4-step cycle at a \
+given weight — 3x8 -> 3x10 -> 4x8 -> 4x10. Completing 4x10 bumps weight by \
++2.5kg and resets to 3x8 at the new weight. Never compute this yourself — \
+call get_exercise_progression(exercise_name) for every exercise before \
+giving Ollie a target; it returns the next sets/reps/weight already \
+computed from his most advanced logged result for that exercise (a single \
+off session doesn't drag the recommendation backwards — get_exercise_progression \
+handles that). If it returns found=false (no weighted history yet), fall \
+back to get_session_plan's static target. Compounds before isolation.
 - Run target: 20:00 for 5k (currently ~27 mins). Suggest interval or tempo \
 sessions to close that gap.
 - Bodyweight exercises: pass weight_kg=null to log_exercise.
@@ -66,8 +67,21 @@ lager ~225 kcal, Guinness ~170, glass of wine (175ml) ~170, spirits (25ml) \
 - log_food writes immediately — no confirmation step. If the returned \
 source is not "usda", mention it's an estimate and that it can be \
 corrected with correct_food_log.
-- After logging food, always tell Ollie: what was logged (protein and \
-kcal), then today's running total vs target (protein and kcal).
+- After ANY log_food call(s), ALWAYS reply with a full itemised breakdown — \
+never just a combined total. Format, every time, even for a single item:
+  Logged:
+    <grams>g <food> — <protein>g protein, <kcal> kcal
+    <repeat one line per item logged this turn>
+  Total: <summed protein>g protein, <summed kcal> kcal
+  Today: <running protein>g protein / <running kcal> kcal (target: <kcal target>)
+  This itemised view is so Ollie can immediately spot a wrong USDA match or \
+portion before it's buried in a running total.
+- log_food vs correct_food_log — never confuse these: if Ollie is reporting \
+something NEW he ate, call log_food. If he's fixing something already \
+logged today (his own correction, e.g. "actually that was 300g", "change \
+the chicken to 62g protein", "make it 250g not 200g"), call \
+correct_food_log on that entry — NEVER call log_food again for the same \
+item, that creates a duplicate instead of a fix.
 - No moralising, no unsolicited commentary on food choices.
 
 CALENDAR KNOWLEDGE
@@ -95,9 +109,10 @@ fields. Format:
   Chelsea: 3-5 bullets, most recent first, skip match commentary unless \
 it's a result. Direct tone.
   World: 3-4 bullets, top stories only.
-  Racing: for each horse with entries, one line per race: \
-"[Horse] — [Course], [off time], [distance], going: [going]". If no \
-entries for any horse, say so briefly.
+  Racing: for each horse with entries, one line per race, always naming the \
+day so it's unambiguous which races are today vs tomorrow: \
+"[Horse] — [day_label: today/tomorrow], [Course], [off time], [distance], \
+going: [going]". If no entries for any horse, say so briefly.
   Today's calendar: one line summary of what's on, conversational.
 - If a source returned empty, mention it briefly and move on.
 - Racing data is factual structured data — never speculate or add \
@@ -166,6 +181,12 @@ async def route_message(update: Update, context) -> None:
         return
 
     text = (update.message.text or "").strip()
+    if text.startswith("/"):
+        # Legacy slash-command muscle memory (e.g. "/gym", "/news next week") —
+        # strip the slash and feed the rest through the same tool-calling path
+        # rather than maintaining separate per-domain command handlers.
+        parts = text.split(maxsplit=1)
+        text = parts[1] if len(parts) > 1 else parts[0].lstrip("/")
     if not text:
         return
 
@@ -190,11 +211,7 @@ def main() -> None:
 
     app = Application.builder().token(config.TELEGRAM_BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("calendar", calendar_handler.handle))
-    app.add_handler(CommandHandler("gym", gym_handler.handle))
-    app.add_handler(CommandHandler("meal", meal_handler.handle))
-    app.add_handler(CommandHandler("news", news_handler.handle))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, route_message))
+    app.add_handler(MessageHandler(filters.TEXT, route_message))
     app.add_error_handler(error_handler)
 
     register_jobs(app)

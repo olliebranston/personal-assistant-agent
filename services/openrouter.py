@@ -27,11 +27,21 @@ _client = AsyncOpenAI(
 ToolExecutor = Callable[[str, dict], Awaitable[dict]]
 
 
+def _is_rate_limit(exc: openai.APIError) -> bool:
+    status = getattr(exc, "status_code", None)
+    return status == 429 or "429" in str(exc) or "rate" in str(exc).lower()
+
+
 async def _call_api(messages: list[dict], tools: list[dict] | None, max_attempts: int):
     """Make one chat completion call, retrying on openai.APIError with backoff.
 
+    A 429 (rate limit) is never retried — a 1-2s backoff can't outrun a
+    per-minute quota, so retrying just burns extra calls for nothing. It
+    fails immediately on the first 429 instead.
+
     Returns the response message object (has .content and .tool_calls).
-    Raises the last openai.APIError after max_attempts failures.
+    Raises the last openai.APIError after max_attempts failures (or
+    immediately on a 429).
     """
     last_exc: Exception | None = None
     for attempt in range(max_attempts):
@@ -49,6 +59,9 @@ async def _call_api(messages: list[dict], tools: list[dict] | None, max_attempts
             return response.choices[0].message
         except openai.APIError as exc:
             last_exc = exc
+            if _is_rate_limit(exc):
+                logger.warning("OpenRouter rate limited (429) — not retrying")
+                break
             if attempt < max_attempts - 1:
                 wait = 2 ** attempt  # 1 s, then 2 s
                 logger.warning(

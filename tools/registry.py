@@ -63,6 +63,7 @@ def build_tool_registry(
         "log_exercise": functools.partial(gym.log_exercise, conn),
         "get_last_session": functools.partial(gym.get_last_session, conn),
         "get_exercise_history": functools.partial(gym.get_exercise_history, conn),
+        "get_exercise_progression": functools.partial(gym.get_exercise_progression, conn),
         "get_next_session_type": functools.partial(gym.get_next_session_type, conn),
         "get_session_plan": functools.partial(gym.get_session_plan, conn),
         "get_weekly_gym_summary": functools.partial(gym.get_weekly_gym_summary, conn),
