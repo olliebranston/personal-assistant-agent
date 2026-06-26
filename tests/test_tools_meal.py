@@ -12,6 +12,7 @@ from storage.models import (
     FOOD_LOG_DDL,
     GYM_SESSION_DDL,
     MEAL_PLAN_DDL,
+    USER_FOOD_DDL,
     WEIGHT_LOG_DDL,
     get_food_logs_for_date,
     log_weight as db_log_weight,
@@ -23,6 +24,7 @@ from tools.meal import (
     get_weight_trend,
     log_food,
     log_weight,
+    set_user_food_macros,
 )
 
 
@@ -35,6 +37,7 @@ def _make_conn() -> sqlite3.Connection:
     conn.execute(FOOD_LOG_DDL)
     conn.execute(WEIGHT_LOG_DDL)
     conn.execute(MEAL_PLAN_DDL)
+    conn.execute(USER_FOOD_DDL)
     conn.commit()
     return conn
 
@@ -107,6 +110,88 @@ async def test_log_food_returns_source_field():
     assert estimated["source"] == "estimated"
     assert estimated["protein_g"] == 0.0
     assert estimated["kcal"] == 0.0
+    assert estimated["needs_input"] is True
+    assert "needs_input" not in reference
+
+
+# ── user_foods calibration table ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_log_food_uses_user_override_and_never_calls_lookup_macros(monkeypatch):
+    from storage.models import upsert_user_food
+
+    conn = _make_conn()
+    upsert_user_food(conn, "my weird protein bar", 30.0, 200.0, "2026-06-01T00:00:00")
+
+    async def _raise_if_called(*args, **kwargs):
+        raise AssertionError("lookup_macros should not be called when a user override exists")
+
+    monkeypatch.setattr("tools.meal.lookup_macros", _raise_if_called)
+
+    result = await log_food(conn, food_name="my weird protein bar", grams=50)
+
+    assert result["source"] == "user_defined"
+    assert result["protein_g"] == 15.0  # 30.0g/100g * 50g
+    assert result["kcal"] == 100.0      # 200.0kcal/100g * 50g
+
+
+@pytest.mark.asyncio
+async def test_set_user_food_macros_stores_and_fixes_todays_entry():
+    conn = _make_conn()
+
+    logged = await log_food(conn, food_name="some completely unknown food xyz", grams=100)
+    assert logged["needs_input"] is True
+
+    result = await set_user_food_macros(
+        conn, food_name="some completely unknown food xyz",
+        protein_per_100g=20.0, kcal_per_100g=150.0,
+    )
+
+    assert result["stored"] is True
+    assert result["updated_log"]["protein_g"] == 20.0  # 20.0g/100g * 100g
+    assert result["updated_log"]["kcal"] == 150.0
+    assert result["daily_totals"]["protein_g"] == 20.0
+
+
+@pytest.mark.asyncio
+async def test_set_user_food_macros_calibration_is_used_on_next_log(monkeypatch):
+    conn = _make_conn()
+    await log_food(conn, food_name="some completely unknown food xyz", grams=100)
+    await set_user_food_macros(
+        conn, food_name="some completely unknown food xyz",
+        protein_per_100g=20.0, kcal_per_100g=150.0,
+    )
+
+    async def _raise_if_called(*args, **kwargs):
+        raise AssertionError("lookup_macros should not be called once calibrated")
+
+    monkeypatch.setattr("tools.meal.lookup_macros", _raise_if_called)
+
+    result = await log_food(conn, food_name="some completely unknown food xyz", grams=50)
+
+    assert result["source"] == "user_defined"
+    assert result["protein_g"] == 10.0  # 20.0g/100g * 50g
+
+
+@pytest.mark.asyncio
+async def test_set_user_food_macros_falls_back_to_parsing_legacy_row_with_null_grams():
+    # Simulates a pre-migration row (grams/food_name columns NULL) — the only
+    # path that still needs to parse the description string.
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO food_logs (date, meal_slot, description, protein_g, kcal, source) "
+        "VALUES (?, 'other', '150g mystery meat', 0.0, 0.0, 'estimated')",
+        (date.today().isoformat(),),
+    )
+    conn.commit()
+
+    result = await set_user_food_macros(
+        conn, food_name="mystery meat", protein_per_100g=20.0, kcal_per_100g=200.0,
+    )
+
+    assert result["updated_log"]["protein_g"] == 30.0  # 20.0g/100g * 150g (parsed from description)
+    assert result["updated_log"]["kcal"] == 300.0
 
 
 # ── correct_food_log ────────────────────────────────────────────────────────

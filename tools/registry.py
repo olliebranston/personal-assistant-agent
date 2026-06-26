@@ -69,6 +69,7 @@ def build_tool_registry(
         "get_weekly_gym_summary": functools.partial(gym.get_weekly_gym_summary, conn),
         "log_food": functools.partial(meal.log_food, conn),
         "correct_food_log": functools.partial(meal.correct_food_log, conn),
+        "set_user_food_macros": functools.partial(meal.set_user_food_macros, conn),
         "get_food_log": functools.partial(meal.get_food_log, conn),
         "get_daily_macros": functools.partial(meal.get_daily_macros, conn),
         "get_weekly_macro_summary": functools.partial(meal.get_weekly_macro_summary, conn),

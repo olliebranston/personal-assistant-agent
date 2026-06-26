@@ -96,6 +96,20 @@ def _pre_lookup(query: str) -> tuple[float, float] | None:
     return None
 
 
+_MAX_PLAUSIBLE_PROTEIN_PER_100G = 100.0
+_MAX_PLAUSIBLE_KCAL_PER_100G = 900.0
+
+
+def _is_plausible(protein_per_100g: float, kcal_per_100g: float) -> bool:
+    """Sanity bound on a USDA candidate — covers virtually all real foods
+    (oils top out around 884 kcal/100g, isolated protein powders around
+    90g/100g) and rules out a mismatched product being picked silently."""
+    return (
+        0.0 <= protein_per_100g <= _MAX_PLAUSIBLE_PROTEIN_PER_100G
+        and 0.0 <= kcal_per_100g <= _MAX_PLAUSIBLE_KCAL_PER_100G
+    )
+
+
 def _fallback_lookup(query: str) -> tuple[float, float] | None:
     """Check the hardcoded fallback table. Returns (protein_per_100g, kcal_per_100g) or None."""
     q = query.lower().strip()
@@ -180,8 +194,11 @@ async def lookup_macros(query: str, quantity_g: float) -> dict:
 
     results = await search(query)
 
-    if results:
-        best = results[0]
+    best = next(
+        (r for r in results if _is_plausible(r["protein_per_100g"], r["kcal_per_100g"])),
+        None,
+    )
+    if best:
         scale = quantity_g / 100.0
         return {
             "description": best["description"],
@@ -190,6 +207,11 @@ async def lookup_macros(query: str, quantity_g: float) -> dict:
             "kcal": round(best["kcal_per_100g"] * scale, 0),
             "source": "usda",
         }
+    if results:
+        logger.warning(
+            "USDA results for '%s' all failed the plausibility bounds — falling through",
+            query,
+        )
 
     fallback = _fallback_lookup(query)
     if fallback:

@@ -8,7 +8,9 @@ from storage.models import (
     FOOD_LOG_DDL,
     GYM_SESSION_DDL,
     MEAL_PLAN_DDL,
+    USER_FOOD_DDL,
     WEIGHT_LOG_DDL,
+    migrate_food_logs,
 )
 
 DB_PATH = Path("assistant.db")
@@ -35,5 +37,7 @@ def init_db() -> None:
     conn.execute(FOOD_LOG_DDL)
     conn.execute(WEIGHT_LOG_DDL)
     conn.execute(MEAL_PLAN_DDL)
+    conn.execute(USER_FOOD_DDL)
     conn.commit()
+    migrate_food_logs(conn)
     conn.close()

@@ -149,12 +149,35 @@ CREATE TABLE IF NOT EXISTS food_logs (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     date        TEXT    NOT NULL,   -- YYYY-MM-DD
     meal_slot   TEXT    NOT NULL,   -- breakfast|snack|lunch|shake|dinner|alcohol|other
-    description TEXT    NOT NULL,   -- what the user logged
+    description TEXT    NOT NULL,   -- what the user logged (display only — see grams/food_name)
     protein_g   REAL    NOT NULL,
     kcal        REAL    NOT NULL,
-    source      TEXT    DEFAULT 'usda'  -- usda | estimated
+    source      TEXT    DEFAULT 'usda',  -- usda | reference | user_defined | estimated
+    grams       REAL,                    -- structured quantity; NULL only on pre-migration rows
+    food_name   TEXT                     -- structured food name; NULL only on pre-migration rows
 )
 """
+
+# New databases get grams/food_name from FOOD_LOG_DDL above. Existing
+# assistant.db files predate those columns — there's no migration framework
+# in this project, so this idempotent ALTER TABLE (called from
+# storage.db.init_db) brings them up to date in place. Pre-migration rows
+# keep grams/food_name as NULL; nothing backfills them since old entries are
+# never recomputed in practice.
+FOOD_LOG_MIGRATIONS = (
+    "ALTER TABLE food_logs ADD COLUMN grams REAL",
+    "ALTER TABLE food_logs ADD COLUMN food_name TEXT",
+)
+
+
+def migrate_food_logs(conn: sqlite3.Connection) -> None:
+    """Idempotent: add grams/food_name to an existing food_logs table if missing."""
+    for ddl in FOOD_LOG_MIGRATIONS:
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    conn.commit()
 
 # ---------------------------------------------------------------------------
 # Meal dataclasses
@@ -167,6 +190,8 @@ class FoodLog:
     description: str
     protein_g: float
     kcal: float
+    grams: float      # structured quantity — see migrate_food_logs for why this exists
+    food_name: str    # structured food name — see migrate_food_logs for why this exists
     source: str = "usda"
     id: Optional[int] = field(default=None)
 
@@ -177,9 +202,10 @@ class FoodLog:
 def insert_food_log(conn: sqlite3.Connection, log: FoodLog) -> int:
     """Insert a food log entry and return its new id."""
     cur = conn.execute(
-        """INSERT INTO food_logs (date, meal_slot, description, protein_g, kcal, source)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (log.date, log.meal_slot, log.description, log.protein_g, log.kcal, log.source),
+        """INSERT INTO food_logs (date, meal_slot, description, protein_g, kcal, source, grams, food_name)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (log.date, log.meal_slot, log.description, log.protein_g, log.kcal,
+         log.source, log.grams, log.food_name),
     )
     conn.commit()
     return cur.lastrowid
@@ -216,19 +242,77 @@ def update_food_log(
     protein_g: float,
     kcal: float,
     description: str | None = None,
+    grams: float | None = None,
 ) -> None:
-    """Update protein/kcal (and optionally description) on an existing food log entry."""
+    """Update protein/kcal (and optionally description/grams) on an existing food log entry."""
+    fields = ["protein_g = ?", "kcal = ?"]
+    params: list = [protein_g, kcal]
     if description is not None:
-        conn.execute(
-            "UPDATE food_logs SET protein_g=?, kcal=?, description=? WHERE id=?",
-            (protein_g, kcal, description, log_id),
-        )
-    else:
-        conn.execute(
-            "UPDATE food_logs SET protein_g=?, kcal=? WHERE id=?",
-            (protein_g, kcal, log_id),
-        )
+        fields.append("description = ?")
+        params.append(description)
+    if grams is not None:
+        fields.append("grams = ?")
+        params.append(grams)
+    params.append(log_id)
+    conn.execute(f"UPDATE food_logs SET {', '.join(fields)} WHERE id = ?", params)
     conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# User-calibrated food DDL + CRUD
+# ---------------------------------------------------------------------------
+#
+# Checked before USDA on every lookup (tools/meal.py:_lookup_with_user_override).
+# Populated only via set_user_food_macros, when Ollie answers "couldn't find
+# reliable data for X — what's the protein/kcal per 100g?" — once calibrated,
+# a food stays correct forever instead of repeatedly hitting USDA or a stale
+# hardcoded table.
+
+USER_FOOD_DDL = """
+CREATE TABLE IF NOT EXISTS user_foods (
+    food_key         TEXT PRIMARY KEY,  -- normalised (lower/stripped) food description
+    protein_per_100g REAL NOT NULL,
+    kcal_per_100g    REAL NOT NULL,
+    created_at       TEXT NOT NULL
+)
+"""
+
+
+def _normalize_food_key(query: str) -> str:
+    return query.lower().strip()
+
+
+def upsert_user_food(
+    conn: sqlite3.Connection,
+    food_key: str,
+    protein_per_100g: float,
+    kcal_per_100g: float,
+    created_at: str,
+) -> None:
+    """Insert or replace Ollie's calibrated macros for a food."""
+    conn.execute(
+        """INSERT INTO user_foods (food_key, protein_per_100g, kcal_per_100g, created_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(food_key) DO UPDATE SET
+               protein_per_100g = excluded.protein_per_100g,
+               kcal_per_100g = excluded.kcal_per_100g,
+               created_at = excluded.created_at""",
+        (_normalize_food_key(food_key), protein_per_100g, kcal_per_100g, created_at),
+    )
+    conn.commit()
+
+
+def get_user_food(conn: sqlite3.Connection, query: str) -> tuple[float, float] | None:
+    """Return (protein_per_100g, kcal_per_100g) for a substring match against
+    Ollie's calibrated foods, or None. Same substring-match style as
+    services.nutrition._fallback_lookup."""
+    q = _normalize_food_key(query)
+    rows = conn.execute("SELECT food_key, protein_per_100g, kcal_per_100g FROM user_foods").fetchall()
+    for row in rows:
+        key = row["food_key"]
+        if key in q or q in key:
+            return row["protein_per_100g"], row["kcal_per_100g"]
+    return None
 
 
 # ---------------------------------------------------------------------------

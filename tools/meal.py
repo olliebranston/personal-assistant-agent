@@ -9,7 +9,8 @@ from __future__ import annotations
 import logging
 import random
 import sqlite3
-from datetime import date as _date, timedelta
+from datetime import date as _date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from data.meals import BREAKFAST_ROTATION, LUNCH_ROTATIONS, WEEKDAY_DINNERS, WEEKEND_DINNERS
 from data.recipes import RECIPES, find_recipe, get_recipes_by_category
@@ -20,15 +21,25 @@ from storage.models import (
     get_food_logs_for_date,
     get_recent_recipe_slugs,
     get_recent_sessions,
+    get_user_food,
     get_week_logs,
     get_weight_history,
     insert_food_log,
     insert_meal_plan,
     log_weight as db_log_weight,
     update_food_log,
+    upsert_user_food,
 )
 
 logger = logging.getLogger(__name__)
+
+_TZ = ZoneInfo("Europe/London")
+
+
+def _today() -> _date:
+    """Today's date in Europe/London — never bare date.today() (server may run in a different tz)."""
+    return datetime.now(tz=_TZ).date()
+
 
 PROTEIN_TARGET_G = 230
 CALORIE_TARGETS = {
@@ -89,6 +100,40 @@ def _weight_trend_per_week(history: list[dict]) -> float | None:
 # ── log_food / corrections ──────────────────────────────────────────────────
 
 
+async def _lookup_with_user_override(conn: sqlite3.Connection, food_name: str, grams: float) -> dict:
+    """Check Ollie's calibrated user_foods table first — it always wins over
+    USDA/the hardcoded table since it's his own confirmed value. Falls
+    through to services.nutrition.lookup_macros otherwise."""
+    override = get_user_food(conn, food_name)
+    if override:
+        protein_per_100g, kcal_per_100g = override
+        scale = grams / 100.0
+        return {
+            "description": food_name,
+            "quantity_g": grams,
+            "protein_g": round(protein_per_100g * scale, 1),
+            "kcal": round(kcal_per_100g * scale, 0),
+            "source": "user_defined",
+        }
+    return await lookup_macros(food_name, grams)
+
+
+def _name_from_description(description: str) -> str:
+    """Legacy fallback for pre-migration rows with no food_name column —
+    parses the name back out of the '{grams}g {name}' display string."""
+    parts = description.split(" ", 1)
+    return parts[1] if len(parts) > 1 else description
+
+
+def _grams_from_description(description: str) -> float:
+    """Legacy fallback for pre-migration rows with no grams column."""
+    token = description.split(" ", 1)[0]
+    try:
+        return float(token.rstrip("g"))
+    except ValueError:
+        return 0.0
+
+
 async def log_food(
     conn: sqlite3.Connection,
     food_name: str,
@@ -98,9 +143,9 @@ async def log_food(
     """Look up macros for a food and write it to today's log immediately (§5.1)."""
     try:
         slot = meal_slot or "other"
-        macros = await lookup_macros(food_name, grams)
+        macros = await _lookup_with_user_override(conn, food_name, grams)
 
-        today = _date.today().isoformat()
+        today = _today().isoformat()
         description = f"{grams:.0f}g {food_name}"
         log_id = insert_food_log(conn, FoodLog(
             date=today,
@@ -108,10 +153,12 @@ async def log_food(
             description=description,
             protein_g=macros["protein_g"],
             kcal=macros["kcal"],
+            grams=grams,
+            food_name=food_name,
             source=macros["source"],
         ))
 
-        return {
+        result = {
             "logged": True,
             "id": log_id,
             "food_name": food_name,
@@ -122,8 +169,64 @@ async def log_food(
             "meal_slot": slot,
             "daily_totals": _daily_macros_dict(conn, today),
         }
+        if macros["source"] == "estimated":
+            # Total miss (pre-lookup, USDA, and the fallback table all failed) —
+            # logged as 0g/0kcal so it doesn't block, but flagged so the model
+            # asks Ollie directly rather than letting a silent 0 sit in the log.
+            result["needs_input"] = True
+        return result
     except Exception as exc:
         logger.warning("log_food failed: %s", exc)
+        return {"error": str(exc)}
+
+
+async def set_user_food_macros(
+    conn: sqlite3.Connection,
+    food_name: str,
+    protein_per_100g: float,
+    kcal_per_100g: float,
+) -> dict:
+    """Store Ollie's calibrated macros for a food (checked first on every
+    future lookup) and fix today's most recent matching log entry — the one
+    that triggered the 'couldn't find reliable data' prompt."""
+    try:
+        upsert_user_food(
+            conn, food_name, protein_per_100g, kcal_per_100g,
+            datetime.now(tz=_TZ).isoformat(),
+        )
+
+        today = _today().isoformat()
+        logs = get_food_logs_for_date(conn, today)
+        needle = food_name.lower()
+        target = None
+        for entry in reversed(logs):
+            entry_name = (entry["food_name"] or _name_from_description(entry["description"])).lower()
+            if needle in entry_name or entry_name in needle:
+                target = entry
+                break
+
+        if target is None:
+            return {"stored": True, "food_key": needle.strip(), "updated_log": None}
+
+        grams = target["grams"] if target["grams"] is not None else _grams_from_description(target["description"])
+        scale = grams / 100.0
+        new_protein = round(protein_per_100g * scale, 1)
+        new_kcal = round(kcal_per_100g * scale, 0)
+        update_food_log(conn, target["id"], new_protein, new_kcal, grams=grams)
+
+        return {
+            "stored": True,
+            "food_key": needle.strip(),
+            "updated_log": {
+                "id": target["id"],
+                "description": target["description"],
+                "protein_g": new_protein,
+                "kcal": new_kcal,
+            },
+            "daily_totals": _daily_macros_dict(conn, today),
+        }
+    except Exception as exc:
+        logger.warning("set_user_food_macros failed: %s", exc)
         return {"error": str(exc)}
 
 
@@ -140,7 +243,7 @@ async def correct_food_log(
     USDA lookup at the new gram amount) or 'protein_g' (sets protein directly).
     """
     try:
-        today = _date.today().isoformat()
+        today = _today().isoformat()
         logs = get_food_logs_for_date(conn, today)
         if not logs:
             return {"error": "no food logged today"}
@@ -165,11 +268,13 @@ async def correct_food_log(
         }
 
         if field == "quantity_g":
-            desc_parts = target["description"].split(" ", 1)
-            name_for_lookup = desc_parts[1] if len(desc_parts) > 1 else target["description"]
-            macros = await lookup_macros(name_for_lookup, float(new_value))
+            name_for_lookup = target["food_name"] or _name_from_description(target["description"])
+            macros = await _lookup_with_user_override(conn, name_for_lookup, float(new_value))
             new_desc = f"{float(new_value):.0f}g {name_for_lookup}"
-            update_food_log(conn, target["id"], macros["protein_g"], macros["kcal"], new_desc)
+            update_food_log(
+                conn, target["id"], macros["protein_g"], macros["kcal"], new_desc,
+                grams=float(new_value),
+            )
             after = {
                 "id": target["id"],
                 "description": new_desc,
@@ -231,7 +336,7 @@ async def get_food_log(conn: sqlite3.Connection, date: str) -> dict:
 async def get_daily_macros(conn: sqlite3.Connection, date: str | None = None) -> dict:
     """Return today's (or a given date's) macro totals vs targets."""
     try:
-        d = date or _date.today().isoformat()
+        d = date or _today().isoformat()
         return _daily_macros_dict(conn, d)
     except Exception as exc:
         logger.warning("get_daily_macros failed: %s", exc)
@@ -241,7 +346,7 @@ async def get_daily_macros(conn: sqlite3.Connection, date: str | None = None) ->
 async def get_weekly_macro_summary(conn: sqlite3.Connection) -> dict:
     """Return this week's (Monday-based) daily macro totals and averages."""
     try:
-        today = _date.today()
+        today = _today()
         week_start = (today - timedelta(days=today.weekday())).isoformat()
         week_end = today.isoformat()
         days = get_week_logs(conn, week_start, week_end)
@@ -301,7 +406,7 @@ async def suggest_meal(conn: sqlite3.Connection, meal_type: str) -> dict:
     """Suggest a meal from the rotation for breakfast/lunch/dinner/snack."""
     try:
         mt = meal_type.lower().strip()
-        today = _date.today()
+        today = _today()
         weekday = today.weekday()
 
         if "breakfast" in mt:
@@ -360,7 +465,7 @@ async def generate_meal_plan(conn: sqlite3.Connection, week_start: str | None = 
         if week_start:
             start = _date.fromisoformat(week_start)
         else:
-            today = _date.today()
+            today = _today()
             start = today - timedelta(days=today.weekday())
         week_start_str = start.isoformat()
 
@@ -415,7 +520,7 @@ async def log_weight(conn: sqlite3.Connection, weight_kg: float) -> dict:
         if not (50 <= weight_kg <= 250):
             return {"error": f"weight {weight_kg}kg is outside the plausible range (50-250kg)"}
 
-        today = _date.today().isoformat()
+        today = _today().isoformat()
         db_log_weight(conn, today, weight_kg)
 
         history = get_weight_history(conn, limit=8)
@@ -456,7 +561,10 @@ TOOL_SCHEMAS: list[dict] = [
                 "confirmation step. Call once per distinct food item mentioned, e.g. for "
                 "'200g Greek yoghurt and 80g oats' call this twice. Returns the computed "
                 "macros plus today's running totals vs target, so you don't need a "
-                "separate get_daily_macros call to report progress."
+                "separate get_daily_macros call to report progress. If the result has "
+                "needs_input=true, no reliable data was found (logged as 0g/0kcal so it "
+                "doesn't block) — ask Ollie for protein/kcal per 100g and call "
+                "set_user_food_macros with his answer."
             ),
             "parameters": {
                 "type": "object",
@@ -517,6 +625,37 @@ TOOL_SCHEMAS: list[dict] = [
                     },
                 },
                 "required": ["field", "new_value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_user_food_macros",
+            "description": (
+                "Store Ollie's own protein/kcal-per-100g for a food and fix today's most "
+                "recent matching log entry. Call this only after log_food returned "
+                "needs_input=true and Ollie has answered the follow-up question with numbers "
+                "— never guess these values yourself. Once stored, this food is checked "
+                "before USDA on every future lookup, so it only needs calibrating once."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "food_name": {
+                        "type": "string",
+                        "description": "The food name, matching what was passed to log_food.",
+                    },
+                    "protein_per_100g": {
+                        "type": "number",
+                        "description": "Protein in grams per 100g, as given by Ollie.",
+                    },
+                    "kcal_per_100g": {
+                        "type": "number",
+                        "description": "Calories per 100g, as given by Ollie.",
+                    },
+                },
+                "required": ["food_name", "protein_per_100g", "kcal_per_100g"],
             },
         },
     },
