@@ -311,7 +311,7 @@ def register_jobs(app: Application) -> None:
 
     jq.run_daily(
         _morning_briefing,
-        time=datetime.time(7, 45, tzinfo=_TZ),
+        time=datetime.time(7, 0, tzinfo=_TZ),
     )
     jq.run_daily(
         _midmorning_checkin,
@@ -343,6 +343,6 @@ def register_jobs(app: Application) -> None:
     )
 
     logger.info(
-        "Jobs registered: morning 07:45, mid-morning 10:30 (Mon-Fri), "
+        "Jobs registered: morning 07:00, mid-morning 10:30 (Mon-Fri), "
         "lunch prompt 12:30 (Tue-Thu), evening 21:00, EOD 23:00, Friday 17:00, Sunday 10:00"
     )
