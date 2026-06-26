@@ -12,6 +12,8 @@ import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from utils.telegram_format import send_formatted
+
 logger = logging.getLogger(__name__)
 
 _TZ = ZoneInfo("Europe/London")
@@ -41,7 +43,7 @@ async def create_reminder(
     delay = (fire_at - now).total_seconds()
 
     async def _fire(ctx):
-        await ctx.bot.send_message(chat_id=chat_id, text=f"Reminder: {text}")
+        await send_formatted(ctx.bot, chat_id, f"Reminder: {text}")
 
     telegram_context.job_queue.run_once(_fire, when=delay)
 

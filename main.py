@@ -16,6 +16,7 @@ from services.openrouter import complete
 from storage.db import get_connection, init_db
 from tools.context import build_ambient_context
 from tools.registry import build_tool_registry
+from utils.telegram_format import reply_formatted
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -69,6 +70,13 @@ lager ~225 kcal, Guinness ~170, glass of wine (175ml) ~170, spirits (25ml) \
 - log_food writes immediately — no confirmation step. If the returned \
 source is not "usda", mention it's an estimate and that it can be \
 corrected with correct_food_log.
+- If log_food's result has needs_input=true, no reliable data was found for \
+that food (USDA and the reference table both missed) — it's logged as \
+0g/0kcal so it doesn't block. Ask Ollie plainly: "Couldn't find reliable \
+data for that — what's the protein and calories per 100g? I'll remember it \
+for next time." When he replies with numbers, call set_user_food_macros — \
+never estimate these values yourself, and don't call log_food again for \
+the same item.
 - After ANY log_food call(s), ALWAYS reply with a full itemised breakdown — \
 never just a combined total. Format, every time, even for a single item:
   Logged:
@@ -174,7 +182,7 @@ async def _handle_tool_calling(update: Update, context, text: str) -> None:
 
     memory.add(user_id, "user", text)
     memory.add(user_id, "assistant", reply)
-    await update.message.reply_text(reply)
+    await reply_formatted(update.message, reply)
 
 
 async def route_message(update: Update, context) -> None:

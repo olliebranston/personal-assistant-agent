@@ -17,6 +17,7 @@ from services.openrouter import complete
 from storage.db import get_connection
 from storage.models import get_daily_totals
 from tools.briefing import get_morning_briefing_data
+from utils.telegram_format import send_formatted
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ _BATCH_SLUGS = [
 
 def _get_batch_cook_message() -> str:
     """Return this week's batch cook recipe card from the recipes database."""
-    idx = datetime.date.today().isocalendar()[1] % len(_BATCH_SLUGS)
+    idx = datetime.datetime.now(tz=_TZ).date().isocalendar()[1] % len(_BATCH_SLUGS)
     slug = _BATCH_SLUGS[idx]
     recipe = RECIPES.get(slug, {})
 
@@ -45,21 +46,21 @@ def _get_batch_cook_message() -> str:
     time_mins = recipe.get("time_mins", "?")
     protein = recipe.get("protein_g", "?")
 
-    lines = [f"*Batch cook Sunday — {name}*",
+    lines = [f"**Batch cook Sunday — {name}**",
              f"_{time_mins} mins · {protein}g protein per portion_", ""]
 
-    lines.append("*INGREDIENTS (4 portions)*")
+    lines.append("**INGREDIENTS (4 portions)**")
     for ing in recipe.get("ingredients", []):
         qty = f"{ing['qty']:g}" if isinstance(ing["qty"], (int, float)) else str(ing["qty"])
         unit = f"{ing['unit']} " if ing.get("unit") else ""
         lines.append(f"• {qty} {unit}{ing['item']}")
 
     lines.append("")
-    lines.append("*METHOD*")
+    lines.append("**METHOD**")
     for i, step in enumerate(recipe.get("method", []), 1):
         lines.append(f"{i}. {step}")
 
-    lines += ["", "*ORDER OF OPS*",
+    lines += ["", "**ORDER OF OPS**",
               "1. Start grains/lentils first — hands off while you prep veg.",
               "2. Roast tofu/veg simultaneously.",
               "3. Make sauces/dressings while things cool.",
@@ -173,8 +174,8 @@ def _deterministic_briefing(data: dict) -> str:
 
 
 async def _morning_briefing(context) -> None:
-    """7:45 AM daily: smart morning brief via LLM composition."""
-    weekday = datetime.date.today().weekday()
+    """7:00 AM daily: smart morning brief via LLM composition."""
+    weekday = datetime.datetime.now(tz=_TZ).date().weekday()
 
     conn = get_connection()
     try:
@@ -194,15 +195,16 @@ async def _morning_briefing(context) -> None:
             logger.warning("Morning briefing LLM call failed (%s) — using fallback", exc)
             briefing = _deterministic_briefing(data)
 
-        await context.bot.send_message(chat_id=_UID, text=briefing)
+        await send_formatted(context.bot, _UID, briefing)
 
         # Breakfast prompt (unchanged — Tue/Wed/Thu repeat-meal shortcut)
         if weekday in (1, 2, 3):
             yesterday_breakfast = _format_yesterday_slot_for_prompt(conn, "breakfast")
             if yesterday_breakfast:
-                await context.bot.send_message(
-                    chat_id=_UID,
-                    text=f"Same breakfast as yesterday?\n{yesterday_breakfast}\nSay 'same breakfast' to log it.",
+                await send_formatted(
+                    context.bot,
+                    _UID,
+                    f"Same breakfast as yesterday?\n{yesterday_breakfast}\nSay 'same breakfast' to log it.",
                 )
     finally:
         conn.close()
@@ -217,22 +219,24 @@ async def _lunch_prompt(context) -> None:
         conn.close()
 
     if yesterday_lunch:
-        await context.bot.send_message(
-            chat_id=_UID,
-            text=f"Lunch time. Same as yesterday?\n{yesterday_lunch}\nSay 'same lunch' to log it.",
+        await send_formatted(
+            context.bot,
+            _UID,
+            f"Lunch time. Same as yesterday?\n{yesterday_lunch}\nSay 'same lunch' to log it.",
         )
     else:
         # Nothing logged yesterday — send generic batch cook reminder
         rotation = meal_agent.get_lunch_rotation()
-        await context.bot.send_message(
-            chat_id=_UID,
-            text=f"Lunch time. Batch cook:\n{rotation.split('—')[0].strip()} — log it when you've had it.",
+        await send_formatted(
+            context.bot,
+            _UID,
+            f"Lunch time. Batch cook:\n{rotation.split('—')[0].strip()} — log it when you've had it.",
         )
 
 
 async def _midmorning_checkin(context) -> None:
     """10:30 AM weekdays: nudge if fewer than 60g protein logged."""
-    today = datetime.date.today().isoformat()
+    today = datetime.datetime.now(tz=_TZ).date().isoformat()
     conn = get_connection()
     try:
         totals = get_daily_totals(conn, today)
@@ -242,20 +246,20 @@ async def _midmorning_checkin(context) -> None:
     if totals["protein_g"] >= 60:
         return
 
-    await context.bot.send_message(
-        chat_id=_UID,
-        text=(
-            f"Mid-morning: {totals['protein_g']:.0f}g protein logged.\n"
-            "Breakfast done? 60g by 11am keeps the day on track."
-        ),
+    await send_formatted(
+        context.bot,
+        _UID,
+        f"Mid-morning: {totals['protein_g']:.0f}g protein logged.\n"
+        "Breakfast done? 60g by 11am keeps the day on track.",
     )
 
 
 async def _evening_dinner_prompt(context) -> None:
     """9:00 PM daily: prompt to log dinner."""
-    await context.bot.send_message(
-        chat_id=_UID,
-        text="Evening — what did you have for dinner? Send me the details and I'll log it.",
+    await send_formatted(
+        context.bot,
+        _UID,
+        "Evening — what did you have for dinner? Send me the details and I'll log it.",
     )
 
 
@@ -267,10 +271,7 @@ async def _end_of_day_summary(context) -> None:
     finally:
         conn.close()
 
-    await context.bot.send_message(
-        chat_id=_UID,
-        text=f"End of day:\n\n{summary}",
-    )
+    await send_formatted(context.bot, _UID, f"End of day:\n\n{summary}")
 
 
 async def _friday_meal_plan(context) -> None:
@@ -283,23 +284,23 @@ async def _friday_meal_plan(context) -> None:
 
     # Telegram has a 4096-char limit — split if needed
     if len(summary) <= 4096:
-        await context.bot.send_message(chat_id=_UID, text=summary, parse_mode="Markdown")
+        await send_formatted(context.bot, _UID, summary)
     else:
         # Split at the shopping list section
-        split_marker = "*SHOPPING LIST*"
+        split_marker = "**SHOPPING LIST**"
         idx = summary.find(split_marker)
         if idx > 0:
             part1, part2 = summary[:idx].strip(), summary[idx:].strip()
         else:
             part1, part2 = summary[:4090], summary[4090:]
-        await context.bot.send_message(chat_id=_UID, text=part1, parse_mode="Markdown")
-        await context.bot.send_message(chat_id=_UID, text=part2, parse_mode="Markdown")
+        await send_formatted(context.bot, _UID, part1)
+        await send_formatted(context.bot, _UID, part2)
 
 
 async def _sunday_batch_cook(context) -> None:
     """10:00 AM Sunday: batch cook recipe card for this week's rotation."""
     recipe_msg = _get_batch_cook_message()
-    await context.bot.send_message(chat_id=_UID, text=recipe_msg, parse_mode="Markdown")
+    await send_formatted(context.bot, _UID, recipe_msg)
 
 
 # ── Registration ──────────────────────────────────────────────────────────────

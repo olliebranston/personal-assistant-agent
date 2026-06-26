@@ -148,7 +148,7 @@ def _generate_week_plan(conn) -> str:
         insert_meal_plan(conn, week_start, slot, slug)
 
     batch_recipe = RECIPES[batch_slug]
-    lines = ["*THIS WEEK'S MEAL PLAN*", ""]
+    lines = ["**THIS WEEK'S MEAL PLAN**", ""]
     lines.append("LUNCHES (Mon–Thu batch cook)")
     lines.append(f"• {batch_recipe['name']} — {batch_recipe['protein_g']}g protein, {batch_recipe['time_mins']} mins for 4 portions")
     lines.append("")
@@ -161,7 +161,7 @@ def _generate_week_plan(conn) -> str:
         all_plan_recipes.append((slug, r))
 
     lines.append("")
-    lines.append("*SHOPPING LIST*")
+    lines.append("**SHOPPING LIST**")
     shopping = _derive_shopping_list(all_plan_recipes)
     for category, items in shopping.items():
         if items:
@@ -230,14 +230,14 @@ def _derive_shopping_list(plan_recipes: list[tuple[str, dict]]) -> dict[str, lis
 
 def build_friday_summary(conn) -> str:
     """Generate the Friday week summary + next week's meal plan + derived shopping list."""
-    today = date.today()
+    today = _today()
     week_start = (today - timedelta(days=today.weekday())).isoformat()
     week_end = today.isoformat()
 
     days = get_week_logs(conn, week_start, week_end)
     weight_history = get_weight_history(conn, limit=4)
 
-    lines = ["*FRIDAY SUMMARY*", ""]
+    lines = ["**FRIDAY SUMMARY**", ""]
 
     if days:
         avg_protein = sum(d["protein_g"] for d in days) / len(days)
