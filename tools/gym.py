@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 _TZ = ZoneInfo("Europe/London")
@@ -273,7 +273,7 @@ async def get_session_plan(conn: sqlite3.Connection, session_type: str) -> dict:
 async def get_weekly_gym_summary(conn: sqlite3.Connection) -> dict:
     """Return this week's (Monday-based) logged sessions with exercise counts."""
     try:
-        today = date.today()
+        today = datetime.now(tz=_TZ).date()
         week_start = (today - timedelta(days=today.weekday())).isoformat()
         sessions = get_recent_sessions(conn, limit=20)
         this_week = [s for s in sessions if s.get("date", "") >= week_start]

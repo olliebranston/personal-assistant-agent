@@ -10,7 +10,8 @@ on directly.
 from __future__ import annotations
 
 import random
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from data.meals import (
     BREAKFAST_ROTATION as _BREAKFAST_ROTATION,
@@ -27,6 +28,14 @@ from storage.models import (
     insert_meal_plan,
 )
 
+_TZ = ZoneInfo("Europe/London")
+
+
+def _today() -> date:
+    """Today's date in Europe/London — never bare _today() (server may run in a different tz)."""
+    return datetime.now(tz=_TZ).date()
+
+
 # ── Targets ───────────────────────────────────────────────────────────────────
 
 PROTEIN_TARGET_G = 230
@@ -41,7 +50,7 @@ CALORIE_TARGETS = {
 
 def _daily_summary(conn) -> str:
     """Return today's macro totals vs target."""
-    today = date.today().isoformat()
+    today = _today().isoformat()
     totals = get_daily_totals(conn, today)
     cal_target = _get_calorie_target(conn)
     logs = get_food_logs_for_date(conn, today)
@@ -73,7 +82,7 @@ def daily_summary(conn) -> str:
 
 def _get_calorie_target(conn) -> int:
     """Return today's calorie target based on whether a gym session was logged."""
-    today = date.today().isoformat()
+    today = _today().isoformat()
     sessions = get_recent_sessions(conn, limit=5)
     for s in sessions:
         if s["date"] == today and s["session_type"] in ("push", "pull", "legs"):
@@ -86,13 +95,13 @@ def get_breakfast(weekday: int) -> str:
 
 
 def get_lunch_rotation() -> str:
-    idx = date.today().isocalendar()[1] % len(_LUNCH_ROTATIONS)
+    idx = _today().isocalendar()[1] % len(_LUNCH_ROTATIONS)
     return _LUNCH_ROTATIONS[idx]
 
 
 def _format_yesterday_slot_for_prompt(conn, slot: str) -> str | None:
     """Return a compact description of yesterday's logged items for a slot, or None."""
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    yesterday = (_today() - timedelta(days=1)).isoformat()
     logs = get_food_logs_for_date(conn, yesterday)
     items = [l for l in logs if l["meal_slot"] == slot]
     if not items:
@@ -113,7 +122,7 @@ _BATCH_CATEGORIES = [
 
 def _generate_week_plan(conn) -> str:
     """Generate a weekly meal plan + shopping list and store it in the DB."""
-    today = date.today()
+    today = _today()
     week_start = (today - timedelta(days=today.weekday())).isoformat()
 
     recent_slugs = set(get_recent_recipe_slugs(conn, weeks=2))
