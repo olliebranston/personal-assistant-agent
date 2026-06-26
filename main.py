@@ -39,13 +39,15 @@ delts. Legs = quads, hamstrings, glutes, calves.
 pull-ups, curls, face pulls -> pull. Squats, RDLs, lunges, leg press -> legs.
 - Progression rule: sets x reps advance through a fixed 4-step cycle at a \
 given weight — 3x8 -> 3x10 -> 4x8 -> 4x10. Completing 4x10 bumps weight by \
-+2.5kg and resets to 3x8 at the new weight. Never compute this yourself — \
-call get_exercise_progression(exercise_name) for every exercise before \
-giving Ollie a target; it returns the next sets/reps/weight already \
-computed from his most advanced logged result for that exercise (a single \
-off session doesn't drag the recommendation backwards — get_exercise_progression \
-handles that). If it returns found=false (no weighted history yet), fall \
-back to get_session_plan's static target. Compounds before isolation.
++2.5kg and resets to 3x8 at the new weight (a single off session doesn't \
+drag the recommendation backwards). Never compute this yourself — \
+get_session_plan already returns each exercise's computed sets/reps/weight_kg \
+for push/pull/legs, so always present those directly when telling Ollie \
+today's session — don't ask him to wait for weights separately. weight_kg \
+is null only where there's no weighted history yet (new exercise) — use \
+the static target in that case. For a one-off question about a single \
+exercise ("what weight should I do on bench today"), get_exercise_progression \
+works standalone too. Compounds before isolation.
 - Run target: 20:00 for 5k (currently ~27 mins). Suggest interval or tempo \
 sessions to close that gap.
 - Bodyweight exercises: pass weight_kg=null to log_exercise.

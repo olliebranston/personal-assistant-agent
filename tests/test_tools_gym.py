@@ -233,6 +233,44 @@ async def test_get_session_plan_errors_on_unknown_type():
     assert "error" in result
 
 
+@pytest.mark.asyncio
+async def test_get_session_plan_merges_weights_for_exercises_with_history():
+    # Root cause confirmed by Ollie: a session-plan request only ever returned
+    # static sets/reps, never weights, because the LLM didn't reliably chain
+    # a get_exercise_progression call per exercise. get_session_plan now does
+    # that merge itself, in-process, so weights are always included.
+    conn = _make_conn()
+    s1 = insert_session(conn, GymSession(date="2026-06-01", session_type="push"))
+    insert_set(conn, ExerciseSet(session_id=s1, exercise="bench press", sets=4, reps=8, weight_kg=80.0))
+
+    result = await get_session_plan(conn, session_type="push")
+
+    bench = next(ex for ex in result["exercises"] if ex["exercise"] == "bench press")
+    assert bench["basis"] == "progression"
+    assert bench["weight_kg"] == 80.0
+    assert (bench["sets"], bench["reps"]) == (4, 10)
+
+    # An exercise with no logged history at all falls back to the static plan.
+    ohp = next(ex for ex in result["exercises"] if ex["exercise"] == "overhead press")
+    assert ohp["basis"] == "static"
+    assert ohp["weight_kg"] is None
+    assert ohp["sets"] == 4
+    assert ohp["reps"] == "8"
+
+
+@pytest.mark.asyncio
+async def test_get_session_plan_short_and_run_types_are_not_weight_merged():
+    conn = _make_conn()
+
+    result = await get_session_plan(conn, session_type="run")
+
+    assert result["session_type"] == "run"
+    for ex in result["exercises"]:
+        assert "basis" not in ex
+        assert "target_sets" in ex
+        assert "target_reps" in ex
+
+
 # ── get_weekly_gym_summary ──────────────────────────────────────────────────
 
 

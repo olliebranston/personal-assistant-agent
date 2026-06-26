@@ -259,12 +259,44 @@ async def get_next_session_type(conn: sqlite3.Connection) -> dict:
 
 
 async def get_session_plan(conn: sqlite3.Connection, session_type: str) -> dict:
-    """Return the static target exercise plan for a session type."""
+    """Return the exercise plan for a session type, with weights already computed.
+
+    For push/pull/legs, each exercise's sets/reps/weight_kg come from
+    get_exercise_progression (computed in-process, not a separate tool call)
+    when the exercise has weighted history; otherwise they fall back to the
+    static target_sets/target_reps with weight_kg=null. short/run sessions
+    aren't weight-tracked and are returned as-is from the static plan.
+    """
     try:
         plan = _SESSION_PLANS.get(session_type)
         if plan is None:
             return {"error": f"unknown session_type: {session_type}"}
-        return {"session_type": session_type, "exercises": plan}
+
+        if session_type not in _PPL_CYCLE:
+            return {"session_type": session_type, "exercises": plan}
+
+        exercises = []
+        for ex in plan:
+            progression = await get_exercise_progression(conn, ex["exercise"])
+            if progression.get("found"):
+                exercises.append({
+                    "exercise": ex["exercise"],
+                    "sets": progression["recommended_sets"],
+                    "reps": progression["recommended_reps"],
+                    "weight_kg": progression["recommended_weight_kg"],
+                    "notes": ex["notes"],
+                    "basis": "progression",
+                })
+            else:
+                exercises.append({
+                    "exercise": ex["exercise"],
+                    "sets": ex["target_sets"],
+                    "reps": ex["target_reps"],
+                    "weight_kg": None,
+                    "notes": ex["notes"],
+                    "basis": "static",
+                })
+        return {"session_type": session_type, "exercises": exercises}
     except Exception as exc:
         logger.warning("get_session_plan failed: %s", exc)
         return {"error": str(exc)}
@@ -437,10 +469,14 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "get_session_plan",
             "description": (
-                "Get the target exercise plan (sets/reps per exercise) for a session type — "
-                "push, pull, legs, short, or run. Use this to tell the user what's on today, "
-                "typically after determining the type via get_next_session_type or from what "
-                "the user asked for."
+                "Get the exercise plan for a session type — push, pull, legs, short, or run. "
+                "For push/pull/legs, sets/reps/weight_kg per exercise are already computed from "
+                "logged history (same as get_exercise_progression would return) — present them "
+                "directly, don't call get_exercise_progression again for exercises already in "
+                "this result. weight_kg is null where there's no weighted history yet (new "
+                "exercise) — use the static target in that case. Use this single call to tell "
+                "the user what's on today, typically after determining the type via "
+                "get_next_session_type or from what the user asked for."
             ),
             "parameters": {
                 "type": "object",
