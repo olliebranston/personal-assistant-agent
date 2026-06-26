@@ -43,7 +43,7 @@ def _set_cache(key: str, value) -> None:
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-BBC_CHELSEA_RSS = "https://feeds.bbci.co.uk/sport/football/chelsea/rss.xml"
+BBC_CHELSEA_RSS = "https://feeds.bbci.co.uk/sport/football/teams/chelsea/rss.xml"
 _SKY_CHELSEA_RSS = "https://www.skysports.com/rss/12040"
 BBC_WORLD_RSS = "https://feeds.bbci.co.uk/news/world/rss.xml"
 
@@ -74,6 +74,16 @@ _HEADERS = {
 
 _LIVE_TITLE_PREFIXES = ("goal!", "half-time:", "full-time:", "live:", "ht:", "ft:")
 _CHELSEA_MAX_AGE_SEC = 48 * 3600
+
+
+def _is_chelsea_relevant(title: str, summary: str) -> bool:
+    """Require 'chelsea' in the title or summary.
+
+    Defends against a source silently drifting off-topic — exactly what
+    happened when the Sky Sports fallback ID got repurposed by Sky into a
+    general sports feed and started returning cricket/tennis stories here.
+    """
+    return "chelsea" in title.lower() or "chelsea" in summary.lower()
 
 
 # ── Chelsea FC ────────────────────────────────────────────────────────────────
@@ -130,6 +140,9 @@ async def _fetch_chelsea_from_url(url: str) -> list[dict]:
                 continue
 
             summary = BeautifulSoup(entry.get("summary", ""), "html.parser").get_text()
+            if not _is_chelsea_relevant(title, summary):
+                continue
+
             items.append({
                 "title": title,
                 "summary": summary,
