@@ -252,6 +252,54 @@ def test_tc_target_prefers_a_double_when_set2_doctrine_applies():
     assert "double" in why
 
 
+# ── candidacy minutes floor — early-season transfer availability ───────────
+#
+# Regression coverage for a real bug found live at GW3: the candidacy filter
+# used fpl_squad_v0.py's 900-minute floor (calibrated against a full *prior*
+# season) against bootstrap-static's *this-season* minutes, which is near
+# zero for everyone in the season's first ~10 gameweeks. That silently
+# excluded every non-owned player from the candidate pool, making `single`/
+# `aggressive` infeasible (no player left to bring in) — get_fpl_recommendation
+# returned "no legal squad found" even for a completely legal owned squad.
+
+
+def test_candidacy_minutes_floor_is_zero_before_any_gameweek_has_played():
+    assert fpl_tools._candidacy_minutes_floor(start_gw=1) == 0
+
+
+def test_candidacy_minutes_floor_scales_with_season_progress():
+    # GW3: 2 gameweeks played, 180 possible minutes -> half of that as the bar
+    assert fpl_tools._candidacy_minutes_floor(start_gw=3) == 90
+
+
+def test_candidacy_minutes_floor_caps_at_the_full_season_default():
+    # Well into the season, the floor settles back at the original 900 bar.
+    assert fpl_tools._candidacy_minutes_floor(start_gw=21) == 900
+
+
+@pytest.mark.asyncio
+async def test_early_season_low_minutes_player_is_a_valid_transfer_target(_wired):
+    """An available, not-yet-owned player with realistic early-season minutes
+    (not fpl_squad_v0.py's full-season 900+) must still be transferable in —
+    this is the exact scenario that was broken live at GW3."""
+    conn, bootstrap, fixtures = _wired
+    squad = _seed_current_squad(conn, bootstrap)
+    elements = {e["id"]: e for e in bootstrap["elements"]}
+
+    # Drop every non-owned player's minutes to an early-GW3-realistic figure.
+    for el in bootstrap["elements"]:
+        if el["id"] not in squad:
+            el["minutes"] = 160
+
+    result = await get_fpl_recommendation(conn)
+    # The old bug raised OptimiserInfeasible out of solve(transfer_count=1) /
+    # solve(transfer_count=2) here, since the candidate pool held nothing but
+    # the current squad — get_fpl_recommendation returned {"error": "no legal
+    # squad found ..."} instead of this three-option shape.
+    assert "error" not in result
+    assert {o["id"] for o in result["options"]} == {"hold", "single", "aggressive"}
+
+
 # ── get_fpl_recommendation ──────────────────────────────────────────────────
 
 

@@ -79,7 +79,25 @@ _SET1_LAST_GW = 19  # PHASE1-BRIEF.md §1: set 1 expires at the GW19 deadline
 # ── Phase 2 constants ─────────────────────────────────────────────────────────
 
 _HORIZON = 5  # gameweeks — PHASE2-BRIEF.md §3
-_MIN_MINUTES_FOR_CANDIDACY = 900  # mirrors fpl_squad_v0.py's default filter
+# fpl_squad_v0.py's --min-minutes=900 default is calibrated against *last
+# season's* minutes (a completed 38-gameweek sample, so 900 sensibly means
+# "an established starter"). This module instead reads bootstrap-static's
+# `minutes`, which is *this* season's cumulative minutes — 0 at kickoff,
+# ~90/gameweek after. Using the same 900 floor here was a real bug: before
+# ~GW10 no outfield player has 900 minutes yet, so it silently filtered the
+# entire non-owned player pool to zero, making every transfer option
+# infeasible (confirmed live at GW3 — every non-owned candidate excluded,
+# `single`/`aggressive` had no player left to bring in). Scale the floor to
+# how many gameweeks have actually been possible so far instead.
+_MIN_MINUTES_FOR_CANDIDACY = 900
+
+
+def _candidacy_minutes_floor(start_gw: int) -> int:
+    """Minutes-this-season floor for candidacy, scaled to the season's progress
+    so the filter still means "established starter" at GW3 as well as GW30."""
+    elapsed_gws = max(start_gw - 1, 0)
+    possible_minutes = elapsed_gws * 90
+    return min(_MIN_MINUTES_FOR_CANDIDACY, round(0.5 * possible_minutes))
 _PREFERENCE_EXPIRY_DAYS = 21  # ~3 gameweeks — long enough to matter, short enough an
 # October whim doesn't quietly distort the squad in March (PHASE2-BRIEF.md §6)
 
@@ -730,12 +748,13 @@ def _build_candidate_pool(
     since a discounted planning value isn't a 'prediction' for a specific GW."""
     candidates: list[Candidate] = []
     raw_predictions: dict[int, dict[int, float]] = {}
+    min_minutes = _candidacy_minutes_floor(start_gw)
 
     for el in data["elements"]:
         eid = el["id"]
         minutes = el.get("minutes") or 0
         avail = fpl_xp.availability(el["status"], el.get("chance_of_playing_next_round"))
-        keep = eid in current_squad or eid in force_in or (avail > 0.74 and minutes >= _MIN_MINUTES_FOR_CANDIDACY)
+        keep = eid in current_squad or eid in force_in or (avail > 0.74 and minutes >= min_minutes)
         if not keep:
             continue
 
