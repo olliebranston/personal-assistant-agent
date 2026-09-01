@@ -22,7 +22,7 @@ from storage.models import (
     get_xp_predictions,
     replace_my_picks,
 )
-from services.fpl_optimiser import compute_selling_price
+from services.fpl_optimiser import Candidate, SolveResult, compute_selling_price
 from tools.fpl import cost_basis, get_fpl_calendar, get_fpl_chips, get_fpl_recommendation, sync_gameweeks_from_bootstrap
 
 from tests.fpl_fixtures import legal_squad_ids, synthetic_bootstrap, synthetic_fixtures
@@ -300,6 +300,121 @@ async def test_early_season_low_minutes_player_is_a_valid_transfer_target(_wired
     assert {o["id"] for o in result["options"]} == {"hold", "single", "aggressive"}
 
 
+# ── Lineup and captain sections — Step 1/2 output-contract helpers ─────────
+# (PHASE3-BRIEF.md) — pure-function unit tests against hand-built SolveResult/
+# Candidate inputs, independent of the MILP itself.
+
+
+def _cand(eid: int, team: int, pos: str, xp: float) -> Candidate:
+    return Candidate(element_id=eid, team_id=team, position=pos, now_cost=50, horizon_xp=xp)
+
+
+def test_captain_section_margin_clear_when_gap_is_two_or_more():
+    elements = {1: {"team": 1, "web_name": "A"}, 2: {"team": 2, "web_name": "B"}, 3: {"team": 3, "web_name": "C"}}
+    teams = {1: {"short_name": "AAA"}, 2: {"short_name": "BBB"}, 3: {"short_name": "CCC"}}
+    candidate_by_id = {1: _cand(1, 1, "MID", 8.0), 2: _cand(2, 2, "MID", 6.0), 3: _cand(3, 3, "FWD", 5.0)}
+    result = SolveResult(squad={1, 2, 3}, xi={1, 2, 3}, captain=1, vice=2)
+    cap = fpl_tools._captain_section(result, candidate_by_id, elements, teams, [], gw=1)
+    assert cap["margin"] == "clear"
+    assert cap["pick"] == 1
+    assert cap["xp"] == 8.0
+    assert cap["alternatives"][0]["element"] == 2
+
+
+def test_captain_section_margin_close_between_half_and_two():
+    elements = {1: {"team": 1, "web_name": "A"}, 2: {"team": 2, "web_name": "B"}}
+    teams = {1: {"short_name": "AAA"}, 2: {"short_name": "BBB"}}
+    candidate_by_id = {1: _cand(1, 1, "MID", 7.0), 2: _cand(2, 2, "MID", 6.0)}
+    result = SolveResult(squad={1, 2}, xi={1, 2}, captain=1, vice=2)
+    cap = fpl_tools._captain_section(result, candidate_by_id, elements, teams, [], gw=1)
+    assert cap["margin"] == "close"
+
+
+def test_captain_section_margin_coin_flip_under_half():
+    elements = {1: {"team": 1, "web_name": "A"}, 2: {"team": 2, "web_name": "B"}}
+    teams = {1: {"short_name": "AAA"}, 2: {"short_name": "BBB"}}
+    candidate_by_id = {1: _cand(1, 1, "MID", 6.2), 2: _cand(2, 2, "MID", 6.0)}
+    result = SolveResult(squad={1, 2}, xi={1, 2}, captain=1, vice=2)
+    cap = fpl_tools._captain_section(result, candidate_by_id, elements, teams, [], gw=1)
+    assert cap["margin"] == "coin-flip"
+
+
+def test_captain_section_vice_prefers_a_different_day_fixture():
+    """A lower-xP starter on a different day beats a higher-xP starter sharing
+    the captain's day — PHASE3-BRIEF.md Step 2 rule 2: covers a late benching."""
+    elements = {1: {"team": 1, "web_name": "Cap"}, 2: {"team": 2, "web_name": "SameDay"}, 3: {"team": 3, "web_name": "OtherDay"}}
+    teams = {1: {"short_name": "T1"}, 2: {"short_name": "T2"}, 3: {"short_name": "T3"}}
+    fixtures = [
+        {"event": 1, "team_h": 1, "team_a": 9, "team_h_difficulty": 3, "team_a_difficulty": 3, "kickoff_time": "2026-09-05T14:00:00Z"},
+        {"event": 1, "team_h": 2, "team_a": 8, "team_h_difficulty": 3, "team_a_difficulty": 3, "kickoff_time": "2026-09-05T16:30:00Z"},
+        {"event": 1, "team_h": 3, "team_a": 7, "team_h_difficulty": 3, "team_a_difficulty": 3, "kickoff_time": "2026-09-06T14:00:00Z"},
+    ]
+    candidate_by_id = {1: _cand(1, 1, "MID", 8.0), 2: _cand(2, 2, "MID", 6.0), 3: _cand(3, 3, "MID", 5.0)}
+    result = SolveResult(squad={1, 2, 3}, xi={1, 2, 3}, captain=1, vice=2)
+    cap = fpl_tools._captain_section(result, candidate_by_id, elements, teams, fixtures, gw=1)
+    assert cap["vice"] == 3  # OtherDay, despite lower xP than SameDay
+
+
+def test_captain_section_vice_falls_back_to_best_alternative_without_kickoff_data():
+    elements = {1: {"team": 1, "web_name": "Cap"}, 2: {"team": 2, "web_name": "Best"}, 3: {"team": 3, "web_name": "Worse"}}
+    teams = {1: {"short_name": "T1"}, 2: {"short_name": "T2"}, 3: {"short_name": "T3"}}
+    candidate_by_id = {1: _cand(1, 1, "MID", 8.0), 2: _cand(2, 2, "MID", 6.0), 3: _cand(3, 3, "MID", 5.0)}
+    result = SolveResult(squad={1, 2, 3}, xi={1, 2, 3}, captain=1, vice=2)
+    cap = fpl_tools._captain_section(result, candidate_by_id, elements, teams, [], gw=1)
+    assert cap["vice"] == 2  # best available starter — no kickoff data to compare days on
+
+
+def test_lineup_changes_empty_when_current_matches_recommended():
+    elements = {1: {"element_type": 3}, 2: {"element_type": 2}}
+    assert fpl_tools._lineup_changes({1, 2}, {1, 2}, elements, {}, [], {}, gw=1) == []
+
+
+def test_lineup_changes_detects_a_position_matched_bench_promotion():
+    elements = {
+        1: {"element_type": 2, "team": 1, "web_name": "Starter"},
+        2: {"element_type": 2, "team": 2, "web_name": "BenchPromo"},
+    }
+    teams = {1: {"short_name": "T1"}, 2: {"short_name": "T2"}}
+    candidate_by_id = {1: _cand(1, 1, "DEF", 2.0), 2: _cand(2, 2, "DEF", 6.0)}
+    changes = fpl_tools._lineup_changes({1}, {2}, elements, candidate_by_id, [], teams, gw=1)
+    assert changes == [{"in": 2, "out": 1, "reason": "BenchPromo projects 6.0 xP (no fixture) vs Starter's 2.0 xP (no fixture)"}]
+
+
+def test_lineup_changes_pairs_across_positions_when_formation_shape_changes():
+    elements = {
+        1: {"element_type": 2, "team": 1, "web_name": "DroppedDef"},
+        2: {"element_type": 3, "team": 2, "web_name": "PromotedMid"},
+    }
+    teams = {1: {"short_name": "T1"}, 2: {"short_name": "T2"}}
+    candidate_by_id = {1: _cand(1, 1, "DEF", 2.0), 2: _cand(2, 2, "MID", 6.0)}
+    changes = fpl_tools._lineup_changes({1}, {2}, elements, candidate_by_id, [], teams, gw=1)
+    assert len(changes) == 1
+    assert changes[0] == {"in": 2, "out": 1, "reason": changes[0]["reason"]}
+
+
+def test_lineup_section_formation_string_and_bench_ordering():
+    elements = {
+        1: {"element_type": 1, "team": 1, "web_name": "GK1"},
+        2: {"element_type": 1, "team": 1, "web_name": "GK2"},
+        3: {"element_type": 2, "team": 2, "web_name": "DEF1"},
+        4: {"element_type": 2, "team": 2, "web_name": "DEF2"},
+        5: {"element_type": 3, "team": 3, "web_name": "MID1"},
+        6: {"element_type": 4, "team": 4, "web_name": "FWD1"},
+    }
+    teams = {1: {"short_name": "T1"}, 2: {"short_name": "T2"}, 3: {"short_name": "T3"}, 4: {"short_name": "T4"}}
+    candidate_by_id = {
+        eid: _cand(eid, el["team"], fpl_tools._OPT_POS[el["element_type"]], float(eid))
+        for eid, el in elements.items()
+    }
+    result = SolveResult(squad=set(elements), xi={1, 3, 4, 5, 6}, captain=5, vice=6)
+    lineup = fpl_tools._lineup_section(
+        result, current_starting=set(), elements=elements, teams=teams, fixtures=[], gw=1, candidate_by_id=candidate_by_id,
+    )
+    assert lineup["formation"] == "2-1-1"
+    assert len(lineup["xi"]) == 5
+    assert lineup["bench"] == [{"element": 2, "pos": "GK", "fixture": "no fixture", "difficulty": None, "order": 1}]
+
+
 # ── get_fpl_recommendation ──────────────────────────────────────────────────
 
 
@@ -318,7 +433,7 @@ async def test_get_fpl_recommendation_returns_the_output_contract_shape(_wired):
     result = await get_fpl_recommendation(conn)
 
     assert set(result.keys()) == {
-        "gameweek", "deadline_local", "recommended", "options", "captain", "chip", "warnings",
+        "gameweek", "deadline_local", "recommended", "options", "lineup", "captain", "chip", "warnings",
     }
     assert result["recommended"] in {"hold", "single", "aggressive"}
     option_ids = {o["id"] for o in result["options"]}
@@ -326,7 +441,17 @@ async def test_get_fpl_recommendation_returns_the_output_contract_shape(_wired):
     assert "hold" in option_ids  # §8: hold appears in every option set
     for opt in result["options"]:
         assert set(opt.keys()) == {"id", "label", "transfers", "xp_delta", "hit", "rationale"}
-    assert set(result["captain"].keys()) == {"pick", "alternatives", "rationale"}
+    assert set(result["lineup"].keys()) == {"xi", "bench", "changes_from_current", "formation"}
+    assert len(result["lineup"]["xi"]) == 11
+    assert len(result["lineup"]["bench"]) == 4
+    for row in result["lineup"]["xi"]:
+        assert set(row.keys()) == {"element", "pos", "fixture", "difficulty"}
+    for row in result["lineup"]["bench"]:
+        assert set(row.keys()) == {"element", "pos", "fixture", "difficulty", "order"}
+    assert set(result["captain"].keys()) == {"pick", "xp", "alternatives", "vice", "rationale", "margin"}
+    assert result["captain"]["margin"] in {"clear", "close", "coin-flip"}
+    for alt in result["captain"]["alternatives"]:
+        assert set(alt.keys()) == {"element", "xp", "fixture", "difficulty"}
     assert set(result["chip"].keys()) == {"play", "plan"}
     assert isinstance(result["warnings"], list)
 
@@ -362,7 +487,8 @@ async def test_get_fpl_recommendation_captain_is_in_the_recommended_options_xi_f
 
     result = await get_fpl_recommendation(conn)
     captain_id = result["captain"]["pick"]
-    assert captain_id not in result["captain"]["alternatives"]
+    alt_ids = {a["element"] for a in result["captain"]["alternatives"]}
+    assert captain_id not in alt_ids
     assert len(result["captain"]["alternatives"]) <= 2
 
 

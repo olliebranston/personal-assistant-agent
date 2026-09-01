@@ -65,6 +65,15 @@ def _squad_table(squad: list[dict]) -> str:
     return "```\n" + "\n".join(lines) + "\n```"
 
 
+def _lineup_table(xi: list[dict], elements: dict) -> str:
+    lines = []
+    for p in xi:
+        name = elements.get(p["element"], {}).get("web_name", str(p["element"]))
+        diff = p["difficulty"] if p["difficulty"] is not None else "-"
+        lines.append(f"{p['pos']:<4}{name:<16}{p['fixture']:<12}FDR {diff}")
+    return "```\n" + "\n".join(lines) + "\n```"
+
+
 # ── Message builders ─────────────────────────────────────────────────────────
 
 
@@ -109,9 +118,32 @@ async def _send_t24_recommendation(context, conn, rec: dict) -> None:
             hit_note = f", -{o['hit']}" if o["hit"] else ""
             lines.append(f"- {o['label']}: {o['xp_delta']:+.1f} xP{hit_note}")
 
+    lineup = rec.get("lineup")
+    if lineup:
+        lines += ["", f"Lineup ({lineup['formation']}):", _lineup_table(lineup["xi"], elements)]
+        bench_outfield = [p for p in lineup["bench"] if elements.get(p["element"], {}).get("element_type") != 1]
+        bench_gk = [p for p in lineup["bench"] if elements.get(p["element"], {}).get("element_type") == 1]
+        bench_parts = [f"{p['order']}. {_name(p['element'])}" for p in bench_outfield]
+        if bench_gk:
+            bench_parts.append(f"GK: {_name(bench_gk[0]['element'])}")
+        lines.append("Bench: " + "  ".join(bench_parts))
+
+        if lineup["changes_from_current"]:
+            lines.append("")
+            lines.append("Lineup changes:")
+            for c in lineup["changes_from_current"]:
+                lines.append(f"- {_name(c['in'])} in, {_name(c['out'])} out — {c['reason']}")
+        else:
+            lines.append("No lineup changes.")
+
     cap = rec["captain"]
-    vice_note = f" (vice: {_name(cap['alternatives'][0])})" if cap["alternatives"] else ""
-    lines += ["", f"Captain: {_name(cap['pick'])}{vice_note}"]
+    margin_phrase = {"clear": "clear of", "close": "close over", "coin-flip": "a coin-flip with"}.get(cap["margin"], "ahead of")
+    if cap["alternatives"]:
+        runner_up = cap["alternatives"][0]
+        lines += ["", f"Captain: {_name(cap['pick'])} ({cap['xp']:.1f} xP) — {margin_phrase} {_name(runner_up['element'])} ({runner_up['xp']:.1f} xP)"]
+    else:
+        lines += ["", f"Captain: {_name(cap['pick'])} ({cap['xp']:.1f} xP)"]
+    lines.append(f"Vice: {_name(cap['vice'])}")
 
     chip = rec["chip"]
     chip_line = f"Chips: {chip['plan']}"

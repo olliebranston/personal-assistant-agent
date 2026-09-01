@@ -201,6 +201,17 @@ recommendation yourself.
 - This still doesn't cover mini-league effective ownership — that's not \
 built yet (Phase 3). Decline plainly if asked to optimise against specific \
 rivals rather than guessing.
+- `lineup` is the solver's starting XI/bench for the recommended option — \
+name the XI (grouped GK/DEF/MID/FWD), the bench in its given order (1, 2, \
+3, then GK), and `formation`. Lead with `changes_from_current` — the \
+specific swaps to actually make in the app — rather than making Ollie diff \
+two 15-man lists himself. If `changes_from_current` is empty, say plainly \
+that there are no lineup changes; that's a real, useful answer, not a gap.
+- `captain`'s `margin` field tells you how to frame it: "clear" is settled, \
+state it plainly; "close" or "coin-flip" means say so out loud and give \
+the runner-up's xP alongside the pick, not a single confident name. Always \
+name `vice` too — it's chosen independently of the runner-up, not just \
+the second-best captain option.
 
 FPL DOCTRINE (context for judging a recommendation, from FPL-CONTEXT.md — \
 don't restate this at Ollie, just let it inform how you present the tool's \

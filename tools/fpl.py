@@ -37,6 +37,7 @@ from services.fpl_optimiser import (
     RECOMMENDATION_BIAS_PER_HIT,
     Candidate,
     OptimiserInfeasible,
+    SolveResult,
     compute_selling_price,
     net_value,
     solve,
@@ -793,6 +794,194 @@ def _resolve_names(names: list[str], elements: dict[int, dict]) -> tuple[set[int
     return ids, problems
 
 
+def _fixture_display(fixtures: list[dict], team_id: int, gw: int, teams: dict[int, dict]) -> str:
+    """'OPP (H)' style summary for one team's fixture(s) in one gameweek — 'no
+    fixture' on a blank, joined with ' + ' for the rare double."""
+    parts = []
+    for f in fixtures:
+        if f.get("event") != gw:
+            continue
+        if f["team_h"] == team_id:
+            parts.append(f"{teams.get(f['team_a'], {}).get('short_name', '?')} (H)")
+        elif f["team_a"] == team_id:
+            parts.append(f"{teams.get(f['team_h'], {}).get('short_name', '?')} (A)")
+    return " + ".join(parts) if parts else "no fixture"
+
+
+def _fixture_difficulty(fixtures: list[dict], team_id: int, gw: int) -> int | None:
+    fdr, _count = fpl_xp.team_fdr_for_gw(fixtures, team_id, gw)
+    return round(fdr) if fdr is not None else None
+
+
+def _fixture_date_key(fixtures: list[dict], team_id: int, gw: int) -> str | None:
+    """UK-local calendar date of a team's (first) fixture in a gameweek, for
+    same-day/different-day comparisons (captain vs vice cover). None on a
+    blank or when the fixture has no kickoff_time yet."""
+    for f in fixtures:
+        if f.get("event") != gw or team_id not in (f.get("team_h"), f.get("team_a")):
+            continue
+        kickoff = f.get("kickoff_time")
+        if not kickoff:
+            continue
+        return fpl_client.parse_utc(kickoff).astimezone(_TZ).date().isoformat()
+    return None
+
+
+def _lineup_row(eid: int, elements: dict[int, dict], teams: dict[int, dict], fixtures: list[dict], gw: int) -> dict:
+    el = elements[eid]
+    return {
+        "element": eid,
+        "pos": _OPT_POS[el["element_type"]],
+        "fixture": _fixture_display(fixtures, el["team"], gw, teams),
+        "difficulty": _fixture_difficulty(fixtures, el["team"], gw),
+    }
+
+
+def _lineup_changes(
+    current_starting: set[int], recommended_xi: set[int], elements: dict[int, dict],
+    candidate_by_id: dict[int, Candidate], fixtures: list[dict], teams: dict[int, dict], gw: int,
+) -> list[dict]:
+    """Only the swaps Ollie actually needs to click — dropped-from-XI players
+    paired against promoted-to-XI players, position-matched where possible.
+    Distinct from `transfers`: this fires even with zero transfers, whenever
+    the solver's own start variables disagree with what his app currently
+    shows as starting — PHASE3-BRIEF.md Step 1's whole point (22 points left
+    on the bench across GW1-2 came from exactly this gap going unreported)."""
+    dropped = current_starting - recommended_xi
+    promoted = recommended_xi - current_starting
+    if not dropped and not promoted:
+        return []
+
+    def _pos(eid: int) -> str | None:
+        return _OPT_POS.get(elements[eid]["element_type"]) if eid in elements else None
+
+    def _xp(eid: int) -> float:
+        return candidate_by_id[eid].horizon_xp if eid in candidate_by_id else 0.0
+
+    remaining_out = list(dropped)
+    remaining_in = list(promoted)
+    pairs: list[tuple[int, int]] = []
+    for pos in ("GK", "DEF", "MID", "FWD"):
+        outs = sorted((e for e in remaining_out if _pos(e) == pos), key=_xp)
+        ins = sorted((e for e in remaining_in if _pos(e) == pos), key=lambda e: -_xp(e))
+        for o, i in zip(outs, ins):
+            pairs.append((o, i))
+            remaining_out.remove(o)
+            remaining_in.remove(i)
+    # Formation shape changed (e.g. 3-5-2 -> 4-4-2) — pair what's left regardless of position.
+    for o, i in zip(sorted(remaining_out, key=_xp), sorted(remaining_in, key=lambda e: -_xp(e))):
+        pairs.append((o, i))
+
+    changes = []
+    for out_id, in_id in pairs:
+        out_el, in_el = elements.get(out_id), elements.get(in_id)
+        out_fix = _fixture_display(fixtures, out_el["team"], gw, teams) if out_el else "?"
+        out_diff = _fixture_difficulty(fixtures, out_el["team"], gw) if out_el else None
+        in_fix = _fixture_display(fixtures, in_el["team"], gw, teams) if in_el else "?"
+        reason = (
+            f"{in_el['web_name'] if in_el else in_id} projects {_xp(in_id):.1f} xP ({in_fix}) vs "
+            f"{out_el['web_name'] if out_el else out_id}'s {_xp(out_id):.1f} xP "
+            f"({out_fix}{f', difficulty {out_diff}' if out_diff is not None else ''})"
+        )
+        changes.append({"in": in_id, "out": out_id, "reason": reason})
+    return changes
+
+
+def _lineup_section(
+    result: SolveResult, current_starting: set[int], elements: dict[int, dict],
+    teams: dict[int, dict], fixtures: list[dict], gw: int, candidate_by_id: dict[int, Candidate],
+) -> dict:
+    """§ output contract addition, PHASE3-BRIEF.md Step 1: the MILP already
+    solves for the starting XI and captain — this just returns what it found
+    instead of discarding it, plus changes_from_current so Ollie doesn't have
+    to diff two 15-man lists himself."""
+    pos_order = {"GK": 0, "DEF": 1, "MID": 2, "FWD": 3}
+    xi_rows = sorted(
+        (_lineup_row(eid, elements, teams, fixtures, gw) for eid in result.xi),
+        key=lambda r: (pos_order[r["pos"]], -candidate_by_id[r["element"]].horizon_xp),
+    )
+
+    bench_ids = result.squad - result.xi
+    bench_outfield = sorted(
+        (eid for eid in bench_ids if elements[eid]["element_type"] != 1),
+        key=lambda eid: -candidate_by_id[eid].horizon_xp,
+    )
+    bench_gk = [eid for eid in bench_ids if elements[eid]["element_type"] == 1]
+    bench_rows = [
+        {**_lineup_row(eid, elements, teams, fixtures, gw), "order": i + 1}
+        for i, eid in enumerate(bench_outfield + bench_gk)
+    ]
+
+    return {
+        "xi": xi_rows,
+        "bench": bench_rows,
+        "changes_from_current": _lineup_changes(
+            current_starting, result.xi, elements, candidate_by_id, fixtures, teams, gw,
+        ),
+        "formation": "-".join(
+            str(sum(1 for r in xi_rows if r["pos"] == pos)) for pos in ("DEF", "MID", "FWD")
+        ),
+    }
+
+
+def _captain_section(
+    result: SolveResult, candidate_by_id: dict[int, Candidate], elements: dict[int, dict],
+    teams: dict[int, dict], fixtures: list[dict], gw: int,
+) -> dict:
+    """§ output contract upgrade, PHASE3-BRIEF.md Step 2: captaincy cost 20
+    points in GW2 alone (owned both Fernandes and Haaland, captained the
+    wrong one) — make the margin and the runner-up visible instead of a
+    single unexplained name, and choose vice independently rather than as
+    the second-best captain."""
+    starters_by_xp = sorted(
+        (eid for eid in result.xi if eid != result.captain),
+        key=lambda eid: -candidate_by_id[eid].horizon_xp,
+    )
+
+    def _candidate_row(eid: int) -> dict:
+        el = elements[eid]
+        return {
+            "element": eid,
+            "xp": round(candidate_by_id[eid].horizon_xp, 1),
+            "fixture": _fixture_display(fixtures, el["team"], gw, teams),
+            "difficulty": _fixture_difficulty(fixtures, el["team"], gw),
+        }
+
+    pick_xp = candidate_by_id[result.captain].horizon_xp
+    alternatives = [_candidate_row(eid) for eid in starters_by_xp[:2]]
+    gap = pick_xp - (alternatives[0]["xp"] if alternatives else pick_xp)
+    margin = "clear" if gap >= 2.0 else ("coin-flip" if gap < 0.5 else "close")
+
+    # Vice is chosen independently of the captain runner-up: prefer the best
+    # remaining starter whose fixture falls on a different day, so a captain
+    # benched at 14:00 Saturday is still covered by someone playing elsewhen.
+    captain_date = _fixture_date_key(fixtures, elements[result.captain]["team"], gw)
+    vice = None
+    if captain_date is not None:
+        vice = next(
+            (eid for eid in starters_by_xp if _fixture_date_key(fixtures, elements[eid]["team"], gw) != captain_date),
+            None,
+        )
+    if vice is None:
+        vice = starters_by_xp[0] if starters_by_xp else result.captain
+
+    pick_el = elements[result.captain]
+    rationale = (
+        f"{pick_el['web_name']} projects the highest horizon xP among starters ({pick_xp:.1f}), "
+        f"{_fixture_display(fixtures, pick_el['team'], gw, teams)} "
+        f"(difficulty {_fixture_difficulty(fixtures, pick_el['team'], gw)})."
+    )
+
+    return {
+        "pick": result.captain,
+        "xp": round(pick_xp, 1),
+        "alternatives": alternatives,
+        "vice": vice,
+        "rationale": rationale,
+        "margin": margin,
+    }
+
+
 def _pair_transfers(transfers_out: list[int], transfers_in: list[int], elements: dict[int, dict]) -> list[dict]:
     """Pair drops with adds by position — squad position counts are exact in the
     solver, so each position's drop/add counts always match 1:1."""
@@ -873,19 +1062,25 @@ async def get_fpl_recommendation(
         data = await fpl_client.bootstrap()
         sync_gameweeks_from_bootstrap(conn, data)
         elements = element_index(data)
+        teams = team_index(data)
 
         tgw = target_gameweek(conn)
         if tgw is None:
             return {"error": "no upcoming gameweek found"}
         gw = tgw["gw"]
 
-        _, owned = owned_element_ids(conn)
+        squad_gw, owned = owned_element_ids(conn)
         current_squad = set(owned)
         if not current_squad:
             return {
                 "error": "no squad on record yet — recommendations start once your "
                          "squad syncs after a deadline passes (see get_fpl_team)"
             }
+        # "What he actually has" per PHASE3-BRIEF.md Step 1 — the starting XI
+        # from the last synced picks, independent of anything the solver
+        # recommends below. Compared against the solver's own start variables
+        # to build changes_from_current.
+        current_starting = {p["element_id"] for p in get_my_picks(conn, squad_gw) if p["multiplier"] > 0}
 
         # Only fetch fixtures/transfers once we know there's a squad to evolve —
         # cheaper, and keeps the "no squad" path down to a single bootstrap call.
@@ -1011,18 +1206,10 @@ async def get_fpl_recommendation(
 
         recommended_result = results_by_id[recommended_id]
         candidate_by_id = {c.element_id: c for c in candidates}
-        starters_by_xp = sorted(
-            (eid for eid in recommended_result.xi if eid != recommended_result.captain),
-            key=lambda eid: -candidate_by_id[eid].horizon_xp,
+        captain_section = _captain_section(recommended_result, candidate_by_id, elements, teams, fixtures, gw)
+        lineup_section = _lineup_section(
+            recommended_result, current_starting, elements, teams, fixtures, gw, candidate_by_id,
         )
-        captain_section = {
-            "pick": recommended_result.captain,
-            "alternatives": starters_by_xp[:2],
-            "rationale": (
-                f"{elements[recommended_result.captain]['web_name']} projects the highest horizon xP "
-                f"among starters ({candidate_by_id[recommended_result.captain].horizon_xp:.1f})."
-            ),
-        }
 
         chips_status = await get_fpl_chips(conn)
         chip_info = chips_status.get("signal", {"play": None, "plan": ""}) if "error" not in chips_status else {"play": None, "plan": ""}
@@ -1041,6 +1228,7 @@ async def get_fpl_recommendation(
             "deadline_local": format_deadline_london(tgw["deadline_utc"]),
             "recommended": recommended_id,
             "options": options,
+            "lineup": lineup_section,
             "captain": captain_section,
             "chip": chip_info,
             "warnings": warnings,
@@ -1131,8 +1319,10 @@ TOOL_SCHEMAS: list[dict] = [
             "name": "get_fpl_recommendation",
             "description": (
                 "Get this week's FPL transfer recommendation: three options (hold/single/"
-                "aggressive) with one chosen by the solver, captain pick with alternatives, "
-                "chip signal, and warnings. THE SOLVER PICKS 'recommended' AND WRITES EVERY "
+                "aggressive) with one chosen by the solver, the recommended starting XI/bench "
+                "with the specific lineup swaps to make (`lineup`), captain pick with margin "
+                "and an independently-chosen vice, chip signal, and warnings. THE SOLVER PICKS "
+                "'recommended' AND WRITES EVERY "
                 "RATIONALE — never state a player, price, or xP figure that isn't in this "
                 "tool's result, never change which option is recommended, never invent your "
                 "own reasoning beyond paraphrasing what's returned. Use for 'what should I do "

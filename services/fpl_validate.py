@@ -74,6 +74,17 @@ def validate_solve(
         if el and el.get("status") != "a" and eid not in warned_element_ids:
             errors.append(f"incoming player {eid} is flagged ({el.get('status')}) with no warning")
 
+    # PHASE3-BRIEF.md Step 1's acceptance criterion: a flagged player must
+    # never appear in the recommended starting XI. The xp model already drives
+    # this in practice (an unavailable player scores ~0 horizon xp, so the
+    # solver has no reason to start one) — this is the hard backstop for the
+    # rare case a whole position group is unavailable and the solver is
+    # forced into it, matching how an incoming transfer is already guarded.
+    for eid in result.xi:
+        el = elements.get(eid)
+        if el and el.get("status") != "a" and eid not in warned_element_ids:
+            errors.append(f"starting player {eid} is flagged ({el.get('status')}) with no warning")
+
     if result.captain not in result.xi:
         errors.append("captain is not in the starting XI")
 
