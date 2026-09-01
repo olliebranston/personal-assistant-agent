@@ -18,7 +18,7 @@ from telegram.ext import Application
 
 import config
 from services import fpl_client
-from services.fpl_optimiser import compute_selling_price, verify_squad_value
+from services.fpl_optimiser import verify_squad_value
 from storage.db import get_connection
 from storage.models import (
     get_all_gameweeks,
@@ -33,7 +33,6 @@ from storage.models import (
     was_notification_sent,
 )
 from tools.fpl import (
-    cost_basis,
     element_index,
     format_countdown,
     format_deadline_london,
@@ -286,9 +285,9 @@ async def _sync_passed_deadlines(conn, data: dict) -> None:
     FPL-CONTEXT.md). picks() 404s until the API catches up; that's a normal state
     (§1 of PHASE1-BRIEF.md), so a miss here just retries next tick.
 
-    Also runs the selling-price money sanity check (verify_squad_value) right
+    Also runs the squad-value money sanity check (verify_squad_value) right
     while we have a freshly-synced squad and FPL's own reported team value in
-    hand — the earliest point a cost-basis bug could be caught, before it ever
+    hand — the earliest point a sync bug could be caught, before it ever
     reaches a recommendation.
     """
     now = now_utc()
@@ -332,20 +331,19 @@ async def _sync_passed_deadlines(conn, data: dict) -> None:
         logger.info("FPL: synced picks/history for GW%d", gw)
 
         reported_value = eh.get("value")
-        if reported_value is not None:
+        bank = eh.get("bank")
+        if reported_value is not None and bank is not None:
             squad_ids = {r["element_id"] for r in rows}
             try:
-                transfer_rows = await fpl_client.transfers(config.FPL_TEAM_ID)
-                basis = cost_basis(squad_ids, transfer_rows, elements)
                 now_cost = {eid: elements[eid]["now_cost"] for eid in squad_ids if eid in elements}
-                selling_price = {eid: compute_selling_price(basis[eid], now_cost[eid]) for eid in squad_ids if eid in now_cost}
-                ok, diff = verify_squad_value(selling_price, squad_ids, reported_value)
+                ok, diff = verify_squad_value(now_cost, squad_ids, bank, reported_value)
                 if not ok:
+                    computed = sum(now_cost.get(eid, 0) for eid in squad_ids) + bank
                     logger.error(
-                        "FPL money sanity check failed for GW%d: computed selling-price sum "
-                        "£%.1fm vs FPL-reported value £%.1fm (diff %+.1fm) — cost-basis logic "
-                        "may be wrong",
-                        gw, sum(selling_price.values()) / 10, reported_value / 10, diff / 10,
+                        "FPL money sanity check failed for GW%d: computed market value+bank "
+                        "£%.1fm vs FPL-reported value £%.1fm (diff %+.1fm) — squad sync may be "
+                        "wrong",
+                        gw, computed / 10, reported_value / 10, diff / 10,
                     )
             except Exception as exc:
                 logger.warning("FPL money sanity check errored for GW%d, skipping: %s", gw, exc)

@@ -119,11 +119,15 @@ def _wired(monkeypatch):
     async def _transfers_fn(team_id):
         return []
 
+    async def _fixtures_fn(gw=None):
+        return []
+
     monkeypatch.setattr(fpl_jobs.fpl_client, "bootstrap", _bootstrap_fn)
     monkeypatch.setattr(fpl_jobs.fpl_client, "entry_history", _entry_history_fn)
     monkeypatch.setattr(fpl_jobs.fpl_client, "league", _league_fn)
     monkeypatch.setattr(fpl_jobs.fpl_client, "picks", _picks_fn)
     monkeypatch.setattr(fpl_jobs.fpl_client, "transfers", _transfers_fn)
+    monkeypatch.setattr(fpl_jobs.fpl_client, "fixtures", _fixtures_fn)
 
     return conn, state
 
@@ -207,7 +211,7 @@ async def test_picks_and_history_populate_automatically_after_deadline(_wired):
         "picks": [{"element": 100, "position": 1, "multiplier": 2, "is_captain": True, "is_vice_captain": False}],
         "entry_history": {
             "points": 70, "total_points": 70, "overall_rank": 90000,
-            "bank": 5, "value": 100, "event_transfers": 0, "event_transfers_cost": 0,
+            "bank": 5, "value": 105, "event_transfers": 0, "event_transfers_cost": 0,
         },
         "active_chip": None,
     }
@@ -235,8 +239,8 @@ async def test_money_sanity_check_logs_loudly_on_mismatch(_wired, caplog):
         "picks": [{"element": 100, "position": 1, "multiplier": 2, "is_captain": True, "is_vice_captain": False}],
         "entry_history": {
             "points": 70, "total_points": 70, "overall_rank": 90000,
-            # Saka's now_cost is 100 tenths with no drift -> computed selling
-            # price is 100, deliberately mismatched against a reported 500.
+            # Saka's now_cost is 100 tenths + bank 5 -> computed 105,
+            # deliberately mismatched against a reported 500.
             "bank": 5, "value": 500, "event_transfers": 0, "event_transfers_cost": 0,
         },
         "active_chip": None,
@@ -259,7 +263,8 @@ async def test_money_sanity_check_silent_when_values_agree(_wired, caplog):
         "picks": [{"element": 100, "position": 1, "multiplier": 2, "is_captain": True, "is_vice_captain": False}],
         "entry_history": {
             "points": 70, "total_points": 70, "overall_rank": 90000,
-            "bank": 5, "value": 100, "event_transfers": 0, "event_transfers_cost": 0,
+            # Saka's now_cost is 100 tenths + bank 5 -> computed 105, matching.
+            "bank": 5, "value": 105, "event_transfers": 0, "event_transfers_cost": 0,
         },
         "active_chip": None,
     }

@@ -80,11 +80,12 @@ def _wired(monkeypatch):
 
     bootstrap = synthetic_bootstrap(num_gws=10)
     fixtures = synthetic_fixtures(num_gws=10)
-    # The seeded squad has never been transferred, so its selling-price sum is
-    # exactly its now_cost sum — entry_history.value must match for the money
-    # sanity check to pass.
+    # entry_history.value is squad market value (sum of now_cost) + bank —
+    # see verify_squad_value's docstring — so the reported value here must
+    # include the bank figure below for the money sanity check to pass.
     _squad_now_cost = {e["id"]: e["now_cost"] for e in bootstrap["elements"]}
-    _squad_value = sum(_squad_now_cost[eid] for eid in legal_squad_ids())
+    _squad_bank = 5
+    _squad_value = sum(_squad_now_cost[eid] for eid in legal_squad_ids()) + _squad_bank
 
     async def _bootstrap(force=False):
         return bootstrap
@@ -96,7 +97,7 @@ def _wired(monkeypatch):
 
     async def _entry_history(team_id):
         return {"current": [{"event": 1, "points": 60, "total_points": 60, "overall_rank": 100000,
-                              "bank": 5, "value": _squad_value, "event_transfers": 0, "event_transfers_cost": 0}],
+                              "bank": _squad_bank, "value": _squad_value, "event_transfers": 0, "event_transfers_cost": 0}],
                 "chips": []}
 
     async def _league(league_id):

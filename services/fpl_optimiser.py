@@ -56,22 +56,33 @@ def compute_selling_price(bought_price: int, current_price: int) -> int:
     return current_price
 
 
-def verify_squad_value(selling_price: dict[int, int], current_squad: set[int], reported_value: int, tolerance_tenths: int = 1) -> tuple[bool, int]:
-    """Cross-check our computed selling prices against FPL's own reported team
-    value (entry_history.value — the sum of selling prices across the 15).
+def verify_squad_value(now_cost: dict[int, int], current_squad: set[int], bank: int, reported_value: int, tolerance_tenths: int = 2) -> tuple[bool, int]:
+    """Cross-check the squad's current market value against FPL's own reported
+    team value (entry_history.value).
 
-    A disagreement means the cost-basis/selling-price computation has drifted
-    from reality — e.g. a wrong bought-price assumption for an initial-squad
-    pick. That's a silent, compounding money error if it goes unnoticed, so
-    callers making a real decision (get_fpl_recommendation) should refuse
-    rather than proceed when this fails, and the post-deadline sync should log
-    it loudly either way.
+    Confirmed live against team 6748844 on 1 Sept 2026 (GW2): `value` tracks
+    the *current market price* of the 15 (sum of now_cost) plus bank — not the
+    sell-on-fee-adjusted selling price. Comparing against the selling-price
+    sum (this function's original implementation) was wrong: the sell-on fee
+    means selling price is *always* somewhat below market value for anyone
+    who's ever risen, so that version failed on every squad with a single
+    riser, which is any squad a few gameweeks in. cost_basis/
+    compute_selling_price are still correct and still needed — for actual
+    transfer affordability (bank + sell proceeds vs buy cost) — just not as
+    the input to this particular check, which only needs squad membership and
+    live prices, not bought-price reconstruction.
+
+    A disagreement now most likely means the squad we hold on record doesn't
+    match the one FPL has (a sync bug), or now_cost data is stale. That's
+    still worth refusing a real recommendation over, and the post-deadline
+    sync should log it loudly either way.
 
     Returns (ok, diff_tenths) where diff_tenths = computed - reported (signed,
     tenths of £1m). ok is True when |diff_tenths| <= tolerance_tenths (default
-    1 = £0.1m).
+    2 = £0.2m — a small buffer for prices ticking over between the two API
+    calls this check straddles, not for genuine drift).
     """
-    computed = sum(selling_price.get(eid, 0) for eid in current_squad)
+    computed = sum(now_cost.get(eid, 0) for eid in current_squad) + bank
     diff = computed - reported_value
     return abs(diff) <= tolerance_tenths, diff
 

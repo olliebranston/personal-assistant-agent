@@ -23,7 +23,7 @@ from storage.models import (
     replace_my_picks,
 )
 from services.fpl_optimiser import compute_selling_price
-from tools.fpl import cost_basis, get_fpl_calendar, get_fpl_chips, get_fpl_recommendation
+from tools.fpl import cost_basis, get_fpl_calendar, get_fpl_chips, get_fpl_recommendation, sync_gameweeks_from_bootstrap
 
 from tests.fpl_fixtures import legal_squad_ids, synthetic_bootstrap, synthetic_fixtures
 
@@ -74,11 +74,13 @@ def _wired(monkeypatch):
 
     bootstrap = synthetic_bootstrap(num_gws=10)
     fixtures = synthetic_fixtures(num_gws=10)
-    # The seeded squad has never been transferred (no cost_change_start, no
-    # transfer log), so its selling-price sum is exactly its now_cost sum —
-    # entry_history.value must match that for the money sanity check to pass.
+    # entry_history.value is squad market value (sum of now_cost) + bank — not
+    # sell-on-fee-adjusted selling price (verify_squad_value's docstring has
+    # the live confirmation) — so this fixture's reported value must include
+    # the bank figure below for the money sanity check to pass.
     _squad_now_cost = {e["id"]: e["now_cost"] for e in bootstrap["elements"]}
-    _squad_value = sum(_squad_now_cost[eid] for eid in legal_squad_ids())
+    _squad_bank = 5
+    _squad_value = sum(_squad_now_cost[eid] for eid in legal_squad_ids()) + _squad_bank
 
     async def _bootstrap(force=False):
         return bootstrap
@@ -90,7 +92,7 @@ def _wired(monkeypatch):
 
     async def _entry_history(team_id):
         return {"current": [{"event": 1, "points": 60, "total_points": 60, "overall_rank": 100000,
-                              "bank": 5, "value": _squad_value, "event_transfers": 0, "event_transfers_cost": 0}],
+                              "bank": _squad_bank, "value": _squad_value, "event_transfers": 0, "event_transfers_cost": 0}],
                 "chips": []}
 
     async def _league(league_id):
@@ -159,6 +161,95 @@ async def test_get_fpl_chips_includes_a_signal_block(_wired):
     assert "signal" in result
     assert "plan" in result["signal"]
     assert result["signal"]["play"] is None  # normal calendar, nothing forces a chip this week
+
+
+@pytest.mark.asyncio
+async def test_get_fpl_chips_targets_include_a_concrete_wildcard_gw(_wired):
+    conn, bootstrap, fixtures = _wired
+    result = await get_fpl_chips(conn)
+    assert "targets" in result
+    assert "wildcard" in result["targets"]
+    assert 5 <= result["targets"]["wildcard"]["gw"] <= 9
+    assert "aim for GW" in result["signal"]["plan"]
+
+
+# ── Chip timing targets (concrete GW estimates) — pure-function unit tests ──
+
+
+def test_wildcard1_target_picks_first_gw_after_international_break():
+    conn = _make_conn()
+    sync_gameweeks_from_bootstrap(conn, {"events": [
+        {"id": gw, "deadline_time": deadline, "is_current": False, "is_next": False, "finished": False, "data_checked": False}
+        for gw, deadline in [
+            (5, "2026-09-25T18:30:00Z"), (6, "2026-10-02T18:30:00Z"),
+            (7, "2026-10-09T18:30:00Z"), (8, "2026-10-16T18:30:00Z"), (9, "2026-10-23T18:30:00Z"),
+        ]
+    ]})
+    gw, why = fpl_tools._wildcard1_target(conn, current_gw=2)
+    assert gw == 7  # first GW5-9 deadline on/after 6 Oct 2026 (FPL-CONTEXT.md's break end)
+    assert "international break" in why
+
+
+def test_wildcard1_target_falls_back_to_window_end_without_break_data():
+    conn = _make_conn()  # no gameweeks synced yet — nothing to compare against the break date
+    gw, why = fpl_tools._wildcard1_target(conn, current_gw=2)
+    assert gw == 9
+
+
+def test_wildcard1_target_overdue_collapses_to_play_now():
+    conn = _make_conn()
+    gw, why = fpl_tools._wildcard1_target(conn, current_gw=12)
+    assert gw == 12
+    assert "overdue" in why
+
+
+def test_first_blank_gw_finds_earliest_blank_in_range():
+    shapes = {5: {"blanks": [], "doubles": []}, 6: {"blanks": [3], "doubles": []}, 7: {"blanks": [3], "doubles": []}}
+    assert fpl_tools._first_blank_gw(shapes, 5, 8) == 6
+
+
+def test_first_blank_gw_returns_none_when_no_blank_in_range():
+    shapes = {5: {"blanks": [], "doubles": []}}
+    assert fpl_tools._first_blank_gw(shapes, 5, 6) is None
+
+
+def test_biggest_double_gw_picks_the_gw_with_most_doubling_teams():
+    shapes = {6: {"blanks": [], "doubles": [1, 2]}, 7: {"blanks": [], "doubles": [1, 2, 3, 4]}}
+    assert fpl_tools._biggest_double_gw(shapes, 6, 7) == 7
+
+
+def test_biggest_double_gw_returns_none_when_no_doubles():
+    shapes = {6: {"blanks": [], "doubles": []}}
+    assert fpl_tools._biggest_double_gw(shapes, 6, 6) is None
+
+
+def test_tc_target_picks_easiest_single_fixture_for_an_owned_premium():
+    elements = {1: {"now_cost": 130, "team": 10, "web_name": "Star"}}
+    fixtures = [
+        {"event": 6, "team_h": 10, "team_a": 99, "team_h_difficulty": 4, "team_a_difficulty": 2},
+        {"event": 7, "team_h": 10, "team_a": 98, "team_h_difficulty": 1, "team_a_difficulty": 5},
+    ]
+    gw, why = fpl_tools._tc_target(fixtures, elements, {1}, start_gw=6, end_gw=7, prefer_doubles=False)
+    assert gw == 7  # FDR 1 beats FDR 4
+    assert "Star" in why
+
+
+def test_tc_target_none_without_an_owned_premium():
+    elements = {1: {"now_cost": 55, "team": 10, "web_name": "Cheap"}}  # below the £9.0m premium threshold
+    fixtures = [{"event": 6, "team_h": 10, "team_a": 99, "team_h_difficulty": 2, "team_a_difficulty": 2}]
+    assert fpl_tools._tc_target(fixtures, elements, {1}, start_gw=6, end_gw=6, prefer_doubles=False) is None
+
+
+def test_tc_target_prefers_a_double_when_set2_doctrine_applies():
+    elements = {1: {"now_cost": 130, "team": 10, "web_name": "Star"}}
+    fixtures = [
+        {"event": 6, "team_h": 10, "team_a": 99, "team_h_difficulty": 1, "team_a_difficulty": 5},  # easy single, gw6
+        {"event": 7, "team_h": 10, "team_a": 98, "team_h_difficulty": 3, "team_a_difficulty": 3},  # double leg 1
+        {"event": 7, "team_h": 97, "team_a": 10, "team_h_difficulty": 3, "team_a_difficulty": 3},  # double leg 2
+    ]
+    gw, why = fpl_tools._tc_target(fixtures, elements, {1}, start_gw=6, end_gw=7, prefer_doubles=True)
+    assert gw == 7
+    assert "double" in why
 
 
 # ── get_fpl_recommendation ──────────────────────────────────────────────────

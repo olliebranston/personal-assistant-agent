@@ -221,9 +221,13 @@ def _patch_client(monkeypatch):
             ]},
         }
 
+    async def _fixtures(gw=None):
+        return []
+
     monkeypatch.setattr(fpl_tools.fpl_client, "bootstrap", _bootstrap)
     monkeypatch.setattr(fpl_tools.fpl_client, "entry_history", _entry_history)
     monkeypatch.setattr(fpl_tools.fpl_client, "league", _league)
+    monkeypatch.setattr(fpl_tools.fpl_client, "fixtures", _fixtures)
 
 
 @pytest.mark.asyncio

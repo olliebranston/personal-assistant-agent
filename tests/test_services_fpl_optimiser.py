@@ -273,28 +273,39 @@ def test_recommendation_bias_constant_is_two():
 
 
 # ── verify_squad_value — the money self-check ────────────────────────────────
+#
+# now_cost + bank against FPL's reported team value, not selling price — see
+# verify_squad_value's docstring for why (confirmed live against a real team
+# that the sell-on-fee-adjusted comparison was wrong on GW2's actual data).
 
 
 def test_verify_squad_value_matches_within_tolerance():
-    ok, diff = verify_squad_value({1: 61, 2: 57}, {1, 2}, reported_value=118)
+    ok, diff = verify_squad_value({1: 61, 2: 57}, {1, 2}, bank=0, reported_value=118)
+    assert ok is True
+    assert diff == 0
+
+
+def test_verify_squad_value_includes_bank():
+    # market value 118 + bank 5 = 123, matches reported exactly
+    ok, diff = verify_squad_value({1: 61, 2: 57}, {1, 2}, bank=5, reported_value=123)
     assert ok is True
     assert diff == 0
 
 
 def test_verify_squad_value_allows_exactly_the_tolerance():
-    # computed 118, reported 117 -> diff 1 tenth (£0.1m), the boundary must pass
-    ok, diff = verify_squad_value({1: 61, 2: 57}, {1, 2}, reported_value=117)
+    # computed 118, reported 116 -> diff 2 tenths (£0.2m), the boundary must pass
+    ok, diff = verify_squad_value({1: 61, 2: 57}, {1, 2}, bank=0, reported_value=116)
     assert ok is True
-    assert diff == 1
+    assert diff == 2
 
 
 def test_verify_squad_value_fails_beyond_tolerance():
-    ok, diff = verify_squad_value({1: 61, 2: 57}, {1, 2}, reported_value=100)
+    ok, diff = verify_squad_value({1: 61, 2: 57}, {1, 2}, bank=0, reported_value=100)
     assert ok is False
     assert diff == 18  # computed 118 - reported 100
 
 
 def test_verify_squad_value_ignores_players_outside_current_squad():
-    ok, diff = verify_squad_value({1: 61, 2: 57, 3: 999}, {1, 2}, reported_value=118)
+    ok, diff = verify_squad_value({1: 61, 2: 57, 3: 999}, {1, 2}, bank=0, reported_value=118)
     assert ok is True
     assert diff == 0

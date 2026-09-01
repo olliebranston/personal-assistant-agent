@@ -47,6 +47,7 @@ from services.fpl_validate import validate_solve
 from storage.models import (
     add_preference,
     get_active_preferences,
+    get_all_gameweeks,
     get_gameweek,
     get_gameweek_shape,
     get_latest_my_picks_gw,
@@ -380,12 +381,135 @@ async def get_fpl_league(conn: sqlite3.Connection) -> dict:
         return {"error": str(exc)}
 
 
-def _chip_signal(chips_status: dict, shape_this_gw: dict | None) -> dict:
+_INTL_BREAK_END = "2026-10-06"  # FPL-CONTEXT.md §1: merged 2026/27 break runs 21 Sept-6 Oct
+_WILDCARD1_RANGE = (5, 9)
+_FREEHIT1_FALLBACK_GW = 17  # FPL-CONTEXT.md §2.7: spend it rather than lose it if nothing's appeared by ~GW17
+_FREEHIT2_FALLBACK_GW = 33  # FPL-STATUS.md: GW33 collides with the FA Cup semis
+_PREMIUM_COST_TENTHS = 90  # £9.0m+, per FPL-CONTEXT.md §2.5's premium threshold
+
+
+def _wildcard1_target(conn: sqlite3.Connection, current_gw: int) -> tuple[int, str]:
+    """First gameweek at/after the Sept international break, clamped to the
+    doctrine's GW5-9 window — FPL-CONTEXT.md §2.7's stated reasoning is that by
+    then minutes data, post-window signings, and World Cup fitness have all
+    resolved. Overdue (current gw already past the window) collapses to
+    "play now" rather than a stale past gameweek."""
+    lo, hi = _WILDCARD1_RANGE
+    if current_gw > hi:
+        return current_gw, f"overdue — the GW{lo}-{hi} window has passed, play it now"
+    rows = [r for r in get_all_gameweeks(conn) if lo <= r["gw"] <= hi]
+    after_break = sorted(r["gw"] for r in rows if r["deadline_utc"] >= f"{_INTL_BREAK_END}T00:00:00Z")
+    gw = max(after_break[0], current_gw) if after_break else hi
+    return gw, f"first gameweek after the Sept international break, within the GW{lo}-{hi} window"
+
+
+def _first_blank_gw(shapes: dict[int, dict], start_gw: int, end_gw: int) -> int | None:
+    for gw in range(start_gw, end_gw + 1):
+        shape = shapes.get(gw)
+        if shape and shape.get("blanks"):
+            return gw
+    return None
+
+
+def _biggest_double_gw(shapes: dict[int, dict], start_gw: int, end_gw: int) -> int | None:
+    best_gw, best_count = None, 0
+    for gw in range(start_gw, end_gw + 1):
+        shape = shapes.get(gw)
+        count = len(shape["doubles"]) if shape else 0
+        if count > best_count:
+            best_gw, best_count = gw, count
+    return best_gw
+
+
+def _tc_target(
+    fixtures: list[dict], elements: dict[int, dict], current_squad: set[int],
+    start_gw: int, end_gw: int, prefer_doubles: bool,
+) -> tuple[int, str] | None:
+    """Best gameweek in range for Triple Captain, among currently-owned
+    premiums (£9.0m+) — set 1 doctrine wants a clean single at the easiest
+    fixture (lowest FDR); set 2 doctrine prefers a double. No owned premium
+    (e.g. no squad synced yet) means no basis for a number, so this returns
+    None rather than guessing."""
+    premiums = [eid for eid in current_squad if elements.get(eid, {}).get("now_cost", 0) >= _PREMIUM_COST_TENTHS]
+    if not premiums:
+        return None
+    best: tuple[float, int, str] | None = None  # (sort_key, gw, description)
+    for gw in range(start_gw, end_gw + 1):
+        for eid in premiums:
+            el = elements[eid]
+            fdr, count = fpl_xp.team_fdr_for_gw(fixtures, el["team"], gw)
+            if fdr is None:
+                continue
+            if prefer_doubles and count == 2:
+                sort_key = fdr - 10  # doubles always beat any single, ties broken by FDR
+            elif not prefer_doubles and count == 1:
+                sort_key = fdr
+            else:
+                continue
+            if best is None or sort_key < best[0] or (sort_key == best[0] and gw < best[1]):
+                best = (sort_key, gw, el["web_name"])
+    if best is None:
+        return None
+    sort_key, gw, name = best
+    kind = "double" if sort_key < 0 else "single"  # doubles are always sorted negative, see above
+    return gw, f"{name}'s best-looking {kind} fixture in the window"
+
+
+def _chip_targets(
+    conn: sqlite3.Connection, active_set: int, remaining: set[str], current_gw: int,
+    fixtures: list[dict], elements: dict[int, dict], current_squad: set[int], team_ids: set[int],
+) -> dict[str, dict]:
+    """Concrete gameweek estimate per remaining chip, even though it's provisional and
+    will move as fixtures/form/injuries resolve — FPL-CONTEXT.md's chip doctrine is
+    otherwise just a GW range, which isn't a plan Ollie can act on week to week."""
+    end_gw = _SET1_LAST_GW if active_set == 1 else 38
+    shapes = fpl_calendar.all_gameweek_shapes(fixtures, team_ids=team_ids)
+    targets: dict[str, dict] = {}
+
+    if "wildcard" in remaining:
+        if active_set == 1:
+            gw, why = _wildcard1_target(conn, current_gw)
+        else:
+            gw = _biggest_double_gw(shapes, max(current_gw, 26), end_gw) or 28
+            why = "biggest detected double-gameweek run-up" if shapes.get(gw, {}).get("doubles") else "provisional midpoint of the GW26-30 run-up — no double-gameweek data visible this far out yet"
+        targets["wildcard"] = {"gw": gw, "rationale": why}
+
+    if "freehit" in remaining:
+        fallback = _FREEHIT1_FALLBACK_GW if active_set == 1 else _FREEHIT2_FALLBACK_GW
+        blank_gw = _first_blank_gw(shapes, current_gw, end_gw)
+        gw = blank_gw or max(fallback, current_gw)
+        why = "first detected blank gameweek" if blank_gw else (
+            "no blank detected yet — spend it rather than lose it around here" if active_set == 1
+            else "GW33 collides with the FA Cup semis — the standing target until a bigger blank shows up"
+        )
+        targets["freehit"] = {"gw": gw, "rationale": why}
+
+    if "bboost" in remaining:
+        if active_set == 1 and "wildcard" in targets:
+            gw = targets["wildcard"]["gw"] + 1
+            targets["bboost"] = {"gw": gw, "rationale": "gameweek after the Wildcard, when all 15 are fresh"}
+        else:
+            double_gw = _biggest_double_gw(shapes, max(current_gw, 26), end_gw)
+            if double_gw:
+                targets["bboost"] = {"gw": double_gw, "rationale": "biggest detected double gameweek"}
+
+    if "3xc" in remaining:
+        tc = _tc_target(fixtures, elements, current_squad, current_gw, end_gw, prefer_doubles=(active_set == 2))
+        if tc:
+            gw, why = tc
+            targets["3xc"] = {"gw": gw, "rationale": why}
+
+    return targets
+
+
+def _chip_signal(chips_status: dict, shape_this_gw: dict | None, targets: dict[str, dict] | None = None) -> dict:
     """Rule-based chip timing signal (PHASE2-BRIEF.md §7 point 5) — NOT the full
     multi-period chip planner from FPL-CONTEXT.md's Phase 5 build table. `play`
     only fires when THIS gameweek's own detected shape (from fpl_calendar) is a
     blank/double and the matching chip is still available; otherwise it falls
-    back to the static doctrine plan from FPL-CONTEXT.md §2.7."""
+    back to the static doctrine plan from FPL-CONTEXT.md §2.7, sharpened with a
+    concrete (and explicitly re-computed, so it can move) target gameweek from
+    `targets` wherever one could be derived."""
     active_set = chips_status["active_set"]
     remaining = set(chips_status["remaining_current_set"])
     play = None
@@ -395,7 +519,17 @@ def _chip_signal(chips_status: dict, shape_this_gw: dict | None) -> dict:
         elif shape_this_gw.get("doubles") and "bboost" in remaining:
             play = "bboost"
     doctrine = _CHIP_DOCTRINE[active_set]
-    plan = "; ".join(doctrine[c] for c in _CHIP_TYPES if c in remaining) or "all chips used for this set"
+    targets = targets or {}
+    parts = []
+    for c in _CHIP_TYPES:
+        if c not in remaining:
+            continue
+        t = targets.get(c)
+        if t:
+            parts.append(f"{_CHIP_NAMES[c]}: aim for GW{t['gw']} ({t['rationale']})")
+        else:
+            parts.append(doctrine[c])
+    plan = "; ".join(parts) or "all chips used for this set"
     expiry = chips_status.get("days_to_set1_expiry")
     if active_set == 1 and expiry is not None:
         plan += f"; first set expires in {expiry}d"
@@ -436,13 +570,24 @@ async def get_fpl_chips(conn: sqlite3.Connection) -> dict:
             "escalate": active_set == 1 and current_gw >= 14 and bool(set(_CHIP_TYPES) - used[1]),
         }
 
+        remaining = set(result["remaining_current_set"])
+        shape = None
+        targets: dict[str, dict] = {}
         try:
-            fixtures = await fpl_client.fixtures(gw=current_gw)
-            shape = fpl_calendar.gameweek_shape(fixtures, current_gw, team_ids=set(team_index(data)))
+            all_fixtures = await fpl_client.fixtures()
+            team_ids = set(team_index(data))
+            shape = fpl_calendar.gameweek_shape(all_fixtures, current_gw, team_ids=team_ids)
+            if remaining:
+                elements = element_index(data)
+                _, owned = owned_element_ids(conn)
+                targets = _chip_targets(
+                    conn, active_set, remaining, current_gw,
+                    all_fixtures, elements, set(owned), team_ids,
+                )
         except Exception as exc:
-            logger.warning("get_fpl_chips: calendar shape lookup failed, signal will omit it: %s", exc)
-            shape = None
-        result["signal"] = _chip_signal(result, shape)
+            logger.warning("get_fpl_chips: calendar/target lookup failed, signal will fall back to doctrine text: %s", exc)
+        result["targets"] = targets
+        result["signal"] = _chip_signal(result, shape, targets)
         return result
     except Exception as exc:
         logger.warning("get_fpl_chips failed: %s", exc)
@@ -545,14 +690,20 @@ def cost_basis(current_squad: set[int], transfer_rows: list[dict], elements: dic
     and since this fallback covers every player never transferred, it hit an
     entire freshly-built squad (all 15, day one), not an edge case.
 
-    Caveat: cost_change_start's sign wasn't verified against a real mover
-    before this was written — no player had moved price yet this preseason
-    (checked live: 0/595 elements had a nonzero cost_change_start). It's
-    implemented per the documented convention above. The money self-check
-    (verify_squad_value, called from get_fpl_recommendation and the
-    post-deadline sync in bot/fpl_jobs.py) is the live tripwire: if the sign
-    were wrong, it fires loudly the first time any owned player's price
-    actually changes.
+    Confirmed live against team 6748844 on 1 Sept 2026 (GW2): João Pedro
+    (risen, cost_change_start=+1) and Muñoz (fallen, cost_change_start=-1)
+    both matched this convention exactly — now_cost - cost_change_start gave
+    the right start-of-season price for both directions. The sign is correct.
+
+    Residual caveat: this still can't recover a price paid *before* the
+    season-start reference point cost_change_start is measured against, so a
+    squad picked after preseason price movement (rather than at the very
+    first bootstrap-static snapshot) could have a bought_price a few tenths
+    off for players who moved before GW1. verify_squad_value no longer
+    catches this — it checks squad membership and live pricing, not
+    bought-price reconstruction (see its docstring) — so this is an accepted,
+    small, not-independently-checked source of imprecision in selling_price,
+    not a correctness bug to chase further right now.
     """
     basis = {}
     for eid in current_squad:
@@ -732,22 +883,24 @@ async def get_fpl_recommendation(
         basis = cost_basis(current_squad, transfer_rows, elements)
         selling_price = {eid: compute_selling_price(basis[eid], now_cost[eid]) for eid in current_squad}
 
-        # Cross-check against FPL's own reported team value (entry_history.value
-        # = sum of selling prices across the 15) before this money math feeds a
-        # real decision — a silent drift here compounds every week it goes
-        # unnoticed. Refuse rather than recommend on numbers we can't trust.
+        # Cross-check squad market value + bank against FPL's own reported team
+        # value (entry_history.value — current prices, not sell-on-fee-adjusted
+        # selling price; see verify_squad_value's docstring) before this money
+        # math feeds a real decision. Refuse rather than recommend on numbers
+        # we can't trust.
         reported_value = last_row.get("team_value") if last_row else None
         if reported_value is not None:
-            ok, diff = verify_squad_value(selling_price, current_squad, reported_value)
+            ok, diff = verify_squad_value(now_cost, current_squad, bank, reported_value)
             if not ok:
+                computed = sum(now_cost.get(eid, 0) for eid in current_squad) + bank
                 logger.error(
-                    "FPL money sanity check failed: computed selling-price sum £%.1fm vs "
+                    "FPL money sanity check failed: computed market value+bank £%.1fm vs "
                     "FPL-reported value £%.1fm (diff %+.1fm) — refusing to recommend",
-                    sum(selling_price.values()) / 10, reported_value / 10, diff / 10,
+                    computed / 10, reported_value / 10, diff / 10,
                 )
                 return {
                     "error": (
-                        f"selling-price sanity check failed: computed £{sum(selling_price.values())/10:.1f}m "
+                        f"squad value sanity check failed: computed £{computed/10:.1f}m "
                         f"vs FPL-reported £{reported_value/10:.1f}m — refusing to recommend until this is resolved"
                     )
                 }
