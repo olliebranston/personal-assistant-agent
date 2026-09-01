@@ -208,6 +208,18 @@ async def league(league_id: int) -> dict:
     return resp.json()
 
 
+async def live(gw: int) -> dict[int, int]:
+    """event/{gw}/live/ — actual points scored by every player in one gameweek.
+
+    Returns {element_id: total_points}, already collapsed from the raw
+    {"elements": [{"id":.., "stats": {"total_points":..}}, ...]} shape —
+    every caller (the post-gameweek differential report) only wants the
+    final score per player, not the full per-fixture stat breakdown."""
+    resp = await _get(f"event/{gw}/live/")
+    data = resp.json()
+    return {el["id"]: el["stats"]["total_points"] for el in data.get("elements", [])}
+
+
 async def transfers(team_id: int) -> list[dict]:
     """entry/{id}/transfers/ — full transfer history, each with element_in/out and
     element_in_cost/element_out_cost (tenths). Public and unauthenticated — unlike

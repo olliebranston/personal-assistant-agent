@@ -17,15 +17,19 @@ from storage.models import (
     NOTIFICATIONS_SENT_DDL,
     PLAYER_SNAPSHOT_DDL,
     PREFERENCE_DDL,
+    RIVAL_HISTORY_DDL,
+    RIVAL_PICKS_DDL,
+    RIVALS_DDL,
     XP_PREDICTION_DDL,
     get_active_preferences,
     get_xp_predictions,
     replace_my_picks,
 )
 from services.fpl_optimiser import Candidate, SolveResult, compute_selling_price
-from tools.fpl import cost_basis, get_fpl_calendar, get_fpl_chips, get_fpl_recommendation, sync_gameweeks_from_bootstrap
+from tools.fpl import cost_basis, get_fpl_calendar, get_fpl_chips, get_fpl_gw_review, get_fpl_league, get_fpl_recommendation, sync_gameweeks_from_bootstrap
+from storage.models import get_my_picks, sync_rivals_from_standings, replace_rival_picks, upsert_my_history, upsert_rival_history
 
-from tests.fpl_fixtures import legal_squad_ids, synthetic_bootstrap, synthetic_fixtures
+from tests.fpl_fixtures import element_id, legal_squad_ids, synthetic_bootstrap, synthetic_fixtures
 
 
 def _make_conn() -> sqlite3.Connection:
@@ -34,7 +38,7 @@ def _make_conn() -> sqlite3.Connection:
     for ddl in (
         GAMEWEEK_DDL, MY_PICKS_DDL, MY_HISTORY_DDL, PLAYER_SNAPSHOT_DDL,
         NOTIFICATIONS_SENT_DDL, ACKNOWLEDGEMENTS_DDL, XP_PREDICTION_DDL,
-        PREFERENCE_DDL, GAMEWEEK_SHAPE_DDL,
+        PREFERENCE_DDL, GAMEWEEK_SHAPE_DDL, RIVALS_DDL, RIVAL_PICKS_DDL, RIVAL_HISTORY_DDL,
     ):
         conn.execute(ddl)
     conn.commit()
@@ -149,6 +153,132 @@ async def test_get_fpl_calendar_detects_a_reschedule(monkeypatch, _wired):
     # A second call against the same (now-cached) shape reports no new changes.
     result2 = await get_fpl_calendar(conn, horizon=5)
     assert result2["changed_since_last_check"] == []
+
+
+# ── get_fpl_league — mini-league engine (Step 4) ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_fpl_league_includes_rival_derived_fields_when_data_synced(monkeypatch, _wired):
+    """PHASE3-BRIEF.md Step 4's "New output": template holes, my differentials,
+    chips used by rivals, and captain picks of managers ranked above Ollie."""
+    conn, bootstrap, fixtures = _wired
+    my_squad = _seed_current_squad(conn, bootstrap)
+
+    hole_player = element_id(16, 0)   # a player none of Ollie's squad owns
+    my_unique = next(iter(my_squad))  # something Ollie owns that rivals won't
+
+    async def _league(league_id):
+        return {
+            "league": {"name": "FPL Rugby league"},
+            "standings": {"results": [
+                {"entry": 6748844, "rank": 5, "last_rank": 5, "entry_name": "Reece lightning", "player_name": "Ollie Branston", "total": 60},
+                {"entry": 1, "rank": 1, "last_rank": 1, "entry_name": "R1", "player_name": "Rival One", "total": 90},
+                {"entry": 2, "rank": 2, "last_rank": 2, "entry_name": "R2", "player_name": "Rival Two", "total": 85},
+                {"entry": 3, "rank": 3, "last_rank": 3, "entry_name": "R3", "player_name": "Rival Three", "total": 80},
+                {"entry": 4, "rank": 4, "last_rank": 4, "entry_name": "R4", "player_name": "Rival Four", "total": 75},
+            ]},
+        }
+
+    monkeypatch.setattr(fpl_tools.fpl_client, "league", _league)
+
+    sync_rivals_from_standings(conn, [
+        {"entry_id": i, "entry_name": f"R{i}", "player_name": f"Rival {i}", "started_event": 1}
+        for i in (1, 2, 3, 4)
+    ])
+    for i in (1, 2, 3, 4):
+        rows = [{"element_id": hole_player, "multiplier": 2 if i == 1 else 1}]
+        replace_rival_picks(conn, gw=1, entry_id=i, rows=rows)
+
+    result = await get_fpl_league(conn)
+    assert "error" not in result
+
+    hole_name = next(e["web_name"] for e in bootstrap["elements"] if e["id"] == hole_player)
+    assert hole_name in result["template_holes"]  # owned by all 4 active rivals, not by Ollie
+
+    my_unique_name = next(e["web_name"] for e in bootstrap["elements"] if e["id"] == my_unique)
+    assert my_unique_name in result["my_differentials"]  # no rival owns it
+
+    # Rival One (rank 1, above Ollie's rank 5) captained the hole player.
+    assert {"manager_name": "Rival 1", "captain": hole_name} in result["captains_above"]
+    # Rivals 2-4 also rank above Ollie but didn't captain him.
+    assert len(result["captains_above"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_fpl_league_omits_rival_fields_when_no_rival_data_synced(_wired):
+    conn, bootstrap, fixtures = _wired
+    _seed_current_squad(conn, bootstrap)
+    result = await get_fpl_league(conn)
+    assert "error" not in result
+    assert "my_differentials" not in result
+    assert "template_holes" not in result
+
+
+# ── get_fpl_gw_review — PHASE3-ADDENDUM.md §B differential report ──────────
+
+
+@pytest.mark.asyncio
+async def test_get_fpl_gw_review_decomposes_captain_delta_against_the_leader(monkeypatch, _wired):
+    """Verified against real live data in manual testing that this reproduces
+    PHASE3-ADDENDUM.md §B's exact worked example (captain delta -20 vs Angus
+    Robinson, Mukiele's 9 bench points) — this is a synthetic regression test
+    for the wiring, not a re-derivation of that known-answer value."""
+    conn, bootstrap, fixtures = _wired
+    squad = _seed_current_squad(conn, bootstrap)
+    my_picks_rows = get_my_picks(conn, 1)
+    my_captain = next(p["element_id"] for p in my_picks_rows if p["is_captain"])
+    rival_captain = next(p["element_id"] for p in my_picks_rows if p["element_id"] != my_captain and p["multiplier"] > 0)
+
+    upsert_my_history(conn, {
+        "gw": 1, "points": 50, "total_points": 50, "overall_rank": 100, "bank": 0,
+        "team_value": 1000, "transfers": 0, "transfer_cost": 0, "chip": None, "points_on_bench": 5,
+    })
+
+    leader_entry = 999
+    sync_rivals_from_standings(conn, [
+        {"entry_id": leader_entry, "entry_name": "L", "player_name": "Leader Person", "started_event": 1},
+    ])
+    # Same squad shape as Ollie's, just with a different captain.
+    rival_rows = [{"element_id": p["element_id"], "multiplier": p["multiplier"]} for p in my_picks_rows]
+    for r in rival_rows:
+        if r["element_id"] == my_captain:
+            r["multiplier"] = 1
+        elif r["element_id"] == rival_captain:
+            r["multiplier"] = 2
+    replace_rival_picks(conn, gw=1, entry_id=leader_entry, rows=rival_rows)
+    upsert_rival_history(conn, {
+        "gw": 1, "entry_id": leader_entry, "points": 90, "total_points": 90, "rank": 1, "chip": None, "points_on_bench": 3,
+    })
+
+    async def _league(league_id):
+        return {"standings": {"results": [
+            {"entry": leader_entry, "rank": 1, "last_rank": 1, "entry_name": "L", "player_name": "Leader Person", "total": 90},
+            {"entry": 6748844, "rank": 2, "last_rank": 2, "entry_name": "Reece lightning", "player_name": "Ollie Branston", "total": 50},
+        ]}}
+    monkeypatch.setattr(fpl_tools.fpl_client, "league", _league)
+
+    live_points = {eid: 5 for eid in squad}
+    live_points[my_captain] = 10
+    live_points[rival_captain] = 12
+
+    async def _live(gw):
+        return live_points
+    monkeypatch.setattr(fpl_tools.fpl_client, "live", _live)
+
+    result = await get_fpl_gw_review(conn, 1)
+    assert "error" not in result
+    assert result["decomposition"]["vs_rival"]["name"] == "Leader Person"
+    captain_row = next(d for d in result["decomposition"]["decomposition"] if d["cause"] == "captain")
+    assert captain_row["delta"] == (10 * 2) - (12 * 2)  # -4: my captain (10) x2 vs theirs (12) x2
+    assert sum(d["delta"] for d in result["decomposition"]["decomposition"]) == 50 - 90
+
+
+@pytest.mark.asyncio
+async def test_get_fpl_gw_review_errors_when_points_not_synced_yet(_wired):
+    conn, bootstrap, fixtures = _wired
+    result = await get_fpl_gw_review(conn, 1)
+    assert "error" in result
 
 
 # ── get_fpl_chips signal ─────────────────────────────────────────────────────
@@ -362,6 +492,60 @@ def test_captain_section_vice_falls_back_to_best_alternative_without_kickoff_dat
     result = SolveResult(squad={1, 2, 3}, xi={1, 2, 3}, captain=1, vice=2)
     cap = fpl_tools._captain_section(result, candidate_by_id, elements, teams, [], gw=1)
     assert cap["vice"] == 2  # best available starter — no kickoff data to compare days on
+
+
+# ── Captain EO tiebreak — Step 4 / FPL-CONTEXT.md §2.3 ──────────────────────
+
+
+def test_captain_eo_tiebreak_prefers_higher_eo_in_neutral_mode_when_close():
+    # xp gap is 1.0 (< 2.0, "close") — solver picked 1 (xp 7.0), but 2 (xp 6.0,
+    # higher league EO) should win in neutral mode, matching the field.
+    elements = {1: {"team": 1, "web_name": "LowerEO"}, 2: {"team": 2, "web_name": "HigherEO"}}
+    teams = {1: {"short_name": "T1"}, 2: {"short_name": "T2"}}
+    candidate_by_id = {1: _cand(1, 1, "MID", 7.0), 2: _cand(2, 2, "MID", 6.0)}
+    result = SolveResult(squad={1, 2}, xi={1, 2}, captain=1, vice=2)
+    cap = fpl_tools._captain_section(
+        result, candidate_by_id, elements, teams, [], gw=1,
+        eo_by_element={1: 40.0, 2: 90.0}, mode="neutral",
+    )
+    assert cap["pick"] == 2
+    assert cap["margin"] == "close"
+    assert "tiebreak" in cap["rationale"].lower()
+
+
+def test_captain_eo_tiebreak_prefers_lower_eo_in_chase_mode_when_close():
+    elements = {1: {"team": 1, "web_name": "HigherXP"}, 2: {"team": 2, "web_name": "Differential"}}
+    teams = {1: {"short_name": "T1"}, 2: {"short_name": "T2"}}
+    candidate_by_id = {1: _cand(1, 1, "MID", 7.0), 2: _cand(2, 2, "MID", 6.0)}
+    result = SolveResult(squad={1, 2}, xi={1, 2}, captain=1, vice=2)
+    cap = fpl_tools._captain_section(
+        result, candidate_by_id, elements, teams, [], gw=1,
+        eo_by_element={1: 90.0, 2: 10.0}, mode="chase",
+    )
+    assert cap["pick"] == 2  # lower EO preferred when chasing
+
+
+def test_captain_eo_tiebreak_never_overrides_a_clear_margin():
+    # xp gap is 5.0 (>= 2.0, "clear") — EO must not override a settled call.
+    elements = {1: {"team": 1, "web_name": "ClearBest"}, 2: {"team": 2, "web_name": "Other"}}
+    teams = {1: {"short_name": "T1"}, 2: {"short_name": "T2"}}
+    candidate_by_id = {1: _cand(1, 1, "MID", 10.0), 2: _cand(2, 2, "MID", 5.0)}
+    result = SolveResult(squad={1, 2}, xi={1, 2}, captain=1, vice=2)
+    cap = fpl_tools._captain_section(
+        result, candidate_by_id, elements, teams, [], gw=1,
+        eo_by_element={1: 10.0, 2: 95.0}, mode="neutral",
+    )
+    assert cap["pick"] == 1
+    assert cap["margin"] == "clear"
+
+
+def test_captain_eo_tiebreak_no_op_without_eo_data():
+    elements = {1: {"team": 1, "web_name": "A"}, 2: {"team": 2, "web_name": "B"}}
+    teams = {1: {"short_name": "T1"}, 2: {"short_name": "T2"}}
+    candidate_by_id = {1: _cand(1, 1, "MID", 7.0), 2: _cand(2, 2, "MID", 6.0)}
+    result = SolveResult(squad={1, 2}, xi={1, 2}, captain=1, vice=2)
+    cap = fpl_tools._captain_section(result, candidate_by_id, elements, teams, [], gw=1)
+    assert cap["pick"] == 1  # falls back to the solver's own top-xP pick
 
 
 def test_lineup_changes_empty_when_current_matches_recommended():

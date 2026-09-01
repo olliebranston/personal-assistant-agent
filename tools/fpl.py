@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import config
-from services import fpl_calendar, fpl_client, fpl_xp
+from services import fpl_calendar, fpl_client, fpl_league, fpl_xp
 from services.fpl_optimiser import (
     HIT_COST_PER_TRANSFER,
     RECOMMENDATION_BIAS_PER_HIT,
@@ -48,12 +48,19 @@ from services.fpl_validate import validate_solve
 from storage.models import (
     add_preference,
     get_active_preferences,
+    get_active_rivals,
     get_all_gameweeks,
     get_gameweek,
     get_gameweek_shape,
     get_latest_my_picks_gw,
+    get_latest_rival_picks_gw,
+    get_latest_rival_picks_gw_before,
+    get_my_history,
     get_my_picks,
     get_next_gameweek,
+    get_rival_history_for_entry,
+    get_rival_history_row,
+    get_rival_picks,
     log_xp_predictions,
     prune_expired_preferences,
     set_acknowledged,
@@ -374,7 +381,15 @@ async def get_fpl_team(conn: sqlite3.Connection) -> dict:
 
 
 async def get_fpl_league(conn: sqlite3.Connection) -> dict:
-    """`/fpl league` — mini-league table with rank movement since last GW."""
+    """`/fpl league` — mini-league table with rank movement since last GW,
+    plus PHASE3-BRIEF.md Step 4's "New output": chips used by each rival,
+    template holes (players 4+ rivals own that Ollie doesn't), Ollie's own
+    differentials, and the captain picks of managers currently ranked above
+    him. The rival-derived fields are computed from the most recently synced
+    gameweek of rival picks (see get_latest_rival_picks_gw) — they read as
+    empty/omitted rather than erroring when no rival data has synced yet
+    (e.g. GW1, or _sync_rivals hasn't run yet), same convention as every
+    other tool in this module."""
     err = _not_configured()
     if err:
         return err
@@ -394,9 +409,138 @@ async def get_fpl_league(conn: sqlite3.Connection) -> dict:
             }
             for r in results
         ]
-        return {"league_name": league_data.get("league", {}).get("name"), "table": table}
+        result = {"league_name": league_data.get("league", {}).get("name"), "table": table}
+
+        my_row = next((row for row in table if row["is_me"]), None)
+        ref_gw = get_latest_rival_picks_gw(conn)
+        active_rivals = {r["entry_id"]: r for r in get_active_rivals(conn)}
+        if ref_gw is not None and active_rivals:
+            data = await fpl_client.bootstrap()
+            elements = element_index(data)
+            _, owned = owned_element_ids(conn)
+            my_squad = set(owned)
+
+            rival_squads: dict[int, set[int]] = {}
+            for entry_id in active_rivals:
+                picks = get_rival_picks(conn, ref_gw, entry_id)
+                if picks:
+                    rival_squads[entry_id] = {p["element_id"] for p in picks}
+
+            if my_squad and rival_squads:
+                result["my_differentials"] = sorted(
+                    elements[e]["web_name"] for e in fpl_league.my_differentials(my_squad, rival_squads) if e in elements
+                )
+                result["template_holes"] = sorted(
+                    elements[e]["web_name"] for e in fpl_league.league_template_holes(my_squad, rival_squads) if e in elements
+                )
+
+            if my_row is not None:
+                captains_above = []
+                for entry_id, squad in rival_squads.items():
+                    rival = active_rivals[entry_id]
+                    picks = get_rival_picks(conn, ref_gw, entry_id)
+                    captain_pick = next((p for p in picks if p["multiplier"] >= 2), None)
+                    if captain_pick and captain_pick["element_id"] in elements:
+                        row = next((t for t in table if t["entry_id"] == entry_id), None)
+                        if row and row["rank"] < my_row["rank"]:
+                            captains_above.append({
+                                "manager_name": rival["player_name"],
+                                "captain": elements[captain_pick["element_id"]]["web_name"],
+                            })
+                result["captains_above"] = captains_above
+
+            chips_by_rival = []
+            for entry_id, rival in active_rivals.items():
+                used = [row["chip"] for row in get_rival_history_for_entry(conn, entry_id) if row.get("chip")]
+                if used:
+                    chips_by_rival.append({"manager_name": rival["player_name"], "chips_used": used})
+            if chips_by_rival:
+                result["chips_used_by_rivals"] = chips_by_rival
+
+        return result
     except Exception as exc:
         logger.warning("get_fpl_league failed: %s", exc)
+        return {"error": str(exc)}
+
+
+_WIDELY_BOUGHT_THRESHOLD = 3  # PHASE3-ADDENDUM.md §0: "several rivals at once" is the strongest small-league signal
+
+
+async def get_fpl_gw_review(conn: sqlite3.Connection, gw: int) -> dict:
+    """PHASE3-ADDENDUM.md §B + §0's "track rival transfers week to week":
+    the post-gameweek differential report against the league leader (captain/
+    bench/squad decomposition of the points gap) plus what each rival bought
+    and sold this week. Needs my_history and rival_picks/rival_history for
+    `gw` to already be synced (post-deadline sync populates both) — returns
+    {"error": ...} rather than a partial report if they aren't there yet.
+    """
+    err = _not_configured()
+    if err:
+        return err
+    try:
+        my_hist = get_my_history(conn, gw)
+        if my_hist is None or my_hist.get("points") is None:
+            return {"error": f"GW{gw} points not synced yet"}
+
+        data = await fpl_client.bootstrap()
+        elements = element_index(data)
+        names = {eid: el["web_name"] for eid, el in elements.items()}
+
+        league_data = await fpl_client.league(config.FPL_LEAGUE_ID)
+        results = league_data.get("standings", {}).get("results", [])
+        leader = min(results, key=lambda r: r["rank"], default=None)
+
+        decomposition = None
+        if leader is not None and leader["entry"] != config.FPL_TEAM_ID:
+            rival_hist = get_rival_history_row(conn, gw, leader["entry"])
+            my_picks_rows = get_my_picks(conn, gw)
+            rival_picks_rows = get_rival_picks(conn, gw, leader["entry"])
+            if rival_hist and rival_hist.get("points") is not None and my_picks_rows and rival_picks_rows:
+                live_points = await fpl_client.live(gw)
+                my_picks_fmt = [{"element_id": p["element_id"], "multiplier": p["multiplier"]} for p in my_picks_rows]
+                rival_picks_fmt = [{"element_id": p["element_id"], "multiplier": p["multiplier"]} for p in rival_picks_rows]
+                full_result = fpl_league.gw_review_decomposition(
+                    my_points=my_hist["points"], my_picks=my_picks_fmt, my_live_points=live_points,
+                    rival_name=leader["player_name"], rival_points=rival_hist["points"],
+                    rival_picks=rival_picks_fmt, rival_live_points=live_points, names=names,
+                )
+                decomposition = {**full_result, "vs_rival": {**full_result["vs_rival"], "entry_id": leader["entry"]}}
+
+        rival_transfers = []
+        buy_counts: collections.Counter[int] = collections.Counter()
+        for rival in get_active_rivals(conn):
+            curr = get_rival_picks(conn, gw, rival["entry_id"])
+            if not curr:
+                continue
+            prev_gw = get_latest_rival_picks_gw_before(conn, rival["entry_id"], gw)
+            if prev_gw is None:
+                continue
+            prev = get_rival_picks(conn, prev_gw, rival["entry_id"])
+            diff = fpl_league.rival_transfers_from_diff(
+                {p["element_id"] for p in prev}, {p["element_id"] for p in curr},
+            )
+            if diff["in"] or diff["out"]:
+                rival_transfers.append({
+                    "manager_name": rival["player_name"],
+                    "in": [names.get(e, str(e)) for e in diff["in"]],
+                    "out": [names.get(e, str(e)) for e in diff["out"]],
+                })
+                buy_counts.update(diff["in"])
+
+        widely_bought = [
+            {"player": names.get(eid, str(eid)), "rival_count": n}
+            for eid, n in buy_counts.items() if n >= _WIDELY_BOUGHT_THRESHOLD
+        ]
+
+        return {
+            "gw": gw,
+            "my_points": my_hist["points"],
+            "decomposition": decomposition,
+            "rival_transfers": rival_transfers,
+            "widely_bought": widely_bought,
+        }
+    except Exception as exc:
+        logger.warning("get_fpl_gw_review failed: %s", exc)
         return {"error": str(exc)}
 
 
@@ -930,12 +1074,23 @@ def _lineup_section(
 def _captain_section(
     result: SolveResult, candidate_by_id: dict[int, Candidate], elements: dict[int, dict],
     teams: dict[int, dict], fixtures: list[dict], gw: int,
+    eo_by_element: dict[int, float] | None = None, mode: str | None = None,
 ) -> dict:
     """§ output contract upgrade, PHASE3-BRIEF.md Step 2: captaincy cost 20
     points in GW2 alone (owned both Fernandes and Haaland, captained the
     wrong one) — make the margin and the runner-up visible instead of a
     single unexplained name, and choose vice independently rather than as
-    the second-best captain."""
+    the second-best captain.
+
+    Step 4 / FPL-CONTEXT.md §2.3: when the raw-xP gap isn't clear, league EO
+    becomes the tiebreaker instead of the solver's marginal xP edge — pass
+    `eo_by_element` (from services.fpl_league.league_eo, computed from live
+    rival picks) and `mode` (from services.fpl_league.eo_mode) to enable it.
+    Direction depends on mode: neutral/protect match the field (prefer the
+    higher-EO option — FPL-CONTEXT.md §2.2's asymmetric-risk argument for
+    owning what the field owns at the top of the squad); chase differentiates
+    (prefer the lower-EO option). Without both arguments this falls back to
+    the solver's own top-xP pick, unchanged."""
     starters_by_xp = sorted(
         (eid for eid in result.xi if eid != result.captain),
         key=lambda eid: -candidate_by_id[eid].horizon_xp,
@@ -951,33 +1106,56 @@ def _captain_section(
             "difficulty": _fixture_difficulty(fixtures, el["team"], gw),
         }
 
-    pick_xp = candidate_by_id[result.captain].horizon_xp
-    alternatives = [_candidate_row(eid) for eid in starters_by_xp[:2]]
-    gap = pick_xp - (alternatives[0]["xp"] if alternatives else pick_xp)
+    top_xp = candidate_by_id[result.captain].horizon_xp
+    runner_up_id = starters_by_xp[0] if starters_by_xp else None
+    runner_up_xp = candidate_by_id[runner_up_id].horizon_xp if runner_up_id is not None else top_xp
+    gap = top_xp - runner_up_xp
     margin = "clear" if gap >= 2.0 else ("coin-flip" if gap < 0.5 else "close")
+
+    captain_id = result.captain
+    tiebreak_note = ""
+    if margin != "clear" and eo_by_element and mode and runner_up_id is not None:
+        prefer_higher = mode != "chase"
+        pick_eo = eo_by_element.get(captain_id, 0.0)
+        runner_eo = eo_by_element.get(runner_up_id, 0.0)
+        should_swap = (runner_eo > pick_eo) if prefer_higher else (runner_eo < pick_eo)
+        if should_swap:
+            direction = "higher" if prefer_higher else "lower"
+            tiebreak_note = (
+                f" League EO tiebreak ({mode}): {elements[runner_up_id]['web_name']} preferred over "
+                f"{elements[captain_id]['web_name']} — {direction} league effective ownership "
+                f"({runner_eo:.0f}% vs {pick_eo:.0f}%)."
+            )
+            captain_id, runner_up_id = runner_up_id, captain_id
+
+    pick_xp = candidate_by_id[captain_id].horizon_xp
+    alternatives = [_candidate_row(eid) for eid in ([runner_up_id] if runner_up_id is not None else []) + starters_by_xp[1:2]]
 
     # Vice is chosen independently of the captain runner-up: prefer the best
     # remaining starter whose fixture falls on a different day, so a captain
     # benched at 14:00 Saturday is still covered by someone playing elsewhen.
-    captain_date = _fixture_date_key(fixtures, elements[result.captain]["team"], gw)
+    vice_pool = [eid for eid in ([result.captain] + starters_by_xp) if eid != captain_id]
+    vice_pool.sort(key=lambda eid: -candidate_by_id[eid].horizon_xp)
+    captain_date = _fixture_date_key(fixtures, elements[captain_id]["team"], gw)
     vice = None
     if captain_date is not None:
         vice = next(
-            (eid for eid in starters_by_xp if _fixture_date_key(fixtures, elements[eid]["team"], gw) != captain_date),
+            (eid for eid in vice_pool if _fixture_date_key(fixtures, elements[eid]["team"], gw) != captain_date),
             None,
         )
     if vice is None:
-        vice = starters_by_xp[0] if starters_by_xp else result.captain
+        vice = vice_pool[0] if vice_pool else captain_id
 
-    pick_el = elements[result.captain]
+    pick_el = elements[captain_id]
     rationale = (
         f"{pick_el['web_name']} projects the highest horizon xP among starters ({pick_xp:.1f}), "
         f"{_fixture_display(fixtures, pick_el['team'], gw, teams)} "
         f"(difficulty {_fixture_difficulty(fixtures, pick_el['team'], gw)})."
+        f"{tiebreak_note}"
     )
 
     return {
-        "pick": result.captain,
+        "pick": captain_id,
         "pick_name": pick_el["web_name"],
         "xp": round(pick_xp, 1),
         "alternatives": alternatives,
@@ -986,6 +1164,46 @@ def _captain_section(
         "rationale": rationale,
         "margin": margin,
     }
+
+
+def _captain_eo_context(conn: sqlite3.Connection, gw: int, candidate_ids: set[int]) -> dict[int, float]:
+    """League EO for a set of candidate elements, computed from active rivals'
+    *most recently available* picks. Rivals' picks for `gw` itself aren't
+    public until `gw`'s own deadline passes — same constraint as Ollie's own
+    squad — so this uses gw-1 as the reference week, exactly the "what does
+    the field currently look like" signal that's actually available before a
+    deadline. Returns {} on GW1 or whenever no rival data has synced yet;
+    callers must treat that as "no basis for a tiebreak", not an error."""
+    active = get_active_rivals(conn)
+    if not active or gw <= 1:
+        return {}
+    ref_gw = gw - 1
+    picks_by_entry: dict[int, list[dict]] = {}
+    for rival in active:
+        rows = get_rival_picks(conn, ref_gw, rival["entry_id"])
+        if rows:
+            picks_by_entry[rival["entry_id"]] = [
+                {"element_id": r["element_id"], "multiplier": r["multiplier"]} for r in rows
+            ]
+    if not picks_by_entry:
+        return {}
+    return {eid: fpl_league.league_eo(picks_by_entry, eid) for eid in candidate_ids}
+
+
+async def _eo_mode_for_ollie(gw: int) -> str | None:
+    """FPL-CONTEXT.md §2.1's mode switch, from Ollie's *current* live league
+    position — None (rather than guessing) if standings aren't reachable."""
+    try:
+        league_data = await fpl_client.league(config.FPL_LEAGUE_ID)
+    except fpl_client.FPLError:
+        return None
+    results = league_data.get("standings", {}).get("results", [])
+    mine = next((r for r in results if r["entry"] == config.FPL_TEAM_ID), None)
+    if mine is None:
+        return None
+    is_leading = mine["rank"] == 1
+    gws_remaining = max(38 - gw, 0)
+    return fpl_league.eo_mode(is_leading, gws_remaining)
 
 
 def _pair_transfers(transfers_out: list[int], transfers_in: list[int], elements: dict[int, dict]) -> list[dict]:
@@ -1215,7 +1433,17 @@ async def get_fpl_recommendation(
 
         recommended_result = results_by_id[recommended_id]
         candidate_by_id = {c.element_id: c for c in candidates}
-        captain_section = _captain_section(recommended_result, candidate_by_id, elements, teams, fixtures, gw)
+        starters_by_xp = sorted(
+            (e for e in recommended_result.xi if e != recommended_result.captain),
+            key=lambda e: -candidate_by_id[e].horizon_xp,
+        )
+        captain_candidate_ids = {recommended_result.captain} | set(starters_by_xp[:2])
+        eo_by_element = _captain_eo_context(conn, gw, captain_candidate_ids)
+        mode = await _eo_mode_for_ollie(gw) if eo_by_element else None
+        captain_section = _captain_section(
+            recommended_result, candidate_by_id, elements, teams, fixtures, gw,
+            eo_by_element=eo_by_element, mode=mode,
+        )
         lineup_section = _lineup_section(
             recommended_result, current_starting, elements, teams, fixtures, gw, candidate_by_id,
         )
@@ -1280,9 +1508,37 @@ TOOL_SCHEMAS: list[dict] = [
             "name": "get_fpl_league",
             "description": (
                 "Get the FPL mini-league table with each manager's rank movement since last "
-                "gameweek. Use for '/fpl league' or 'how's the mini-league looking'."
+                "gameweek, plus (once rival data has synced — omitted otherwise, don't treat "
+                "that as an error) `my_differentials` (players Ollie owns that no active rival "
+                "does), `template_holes` (players 4+ rivals own that Ollie doesn't — real risk "
+                "invisible to global ownership figures), `captains_above` (who each manager "
+                "currently ranked above Ollie captained last gameweek), and "
+                "`chips_used_by_rivals`. Use for '/fpl league', 'how's the mini-league looking', "
+                "'what does everyone else own', or 'has anyone used a chip'."
             ),
             "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_fpl_gw_review",
+            "description": (
+                "Get the post-gameweek differential report against the mini-league leader: the "
+                "points gap decomposed into captain/bench/squad causes (with the solver's own "
+                "'detail' text, never rewrite the numbers), plus what each active rival bought "
+                "and sold that gameweek and which players 3+ rivals bought at once. Only "
+                "available once that gameweek's points and rival picks have synced (post "
+                "lockdown) — returns an error before then, relay it plainly. Use for 'why did I "
+                "lose to X this week', 'what happened in the league', or 'what did people buy'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "gw": {"type": "integer", "description": "The gameweek to review, e.g. 2."},
+                },
+                "required": ["gw"],
+            },
         },
     },
     {

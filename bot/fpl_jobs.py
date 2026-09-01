@@ -17,19 +17,29 @@ from zoneinfo import ZoneInfo
 from telegram.ext import Application
 
 import config
-from services import fpl_client
+from services import fpl_client, fpl_league
 from services.fpl_optimiser import verify_squad_value
 from storage.db import get_connection
 from storage.models import (
+    get_active_rivals,
     get_all_gameweeks,
+    get_all_rivals,
+    get_latest_rival_picks_gw_before,
     get_latest_snapshot,
     get_my_history,
+    get_my_picks,
+    get_rival_history_row,
+    get_rival_picks,
     get_unreviewed_finished_gameweeks,
+    has_rival_picks,
     insert_player_snapshots,
     is_acknowledged,
     mark_notification_sent,
     replace_my_picks,
+    replace_rival_picks,
+    sync_rivals_from_standings,
     upsert_my_history,
+    upsert_rival_history,
     was_notification_sent,
 )
 from tools.fpl import (
@@ -38,6 +48,7 @@ from tools.fpl import (
     format_deadline_london,
     get_fpl_calendar,
     get_fpl_chips,
+    get_fpl_gw_review,
     get_fpl_recommendation,
     get_fpl_squad,
     now_utc,
@@ -328,6 +339,29 @@ async def _send_review(context, conn, gw: int) -> None:
         move_str = f" ({'up' if movement > 0 else 'down'} {abs(movement)})" if movement else ""
         lines.append(f"Mini-league: {my_standing['rank']}/{len(results)}{move_str}")
 
+    try:
+        review = await get_fpl_gw_review(conn, gw)
+        if "error" not in review:
+            decomp = review.get("decomposition")
+            if decomp:
+                vs = decomp["vs_rival"]
+                lines += ["", f"vs {vs['name']} ({vs['points']} pts, {vs['gap']:+d}):"]
+                for d in decomp["decomposition"]:
+                    lines.append(f"- {d['cause'].capitalize()} ({d['delta']:+d}): {d['detail']}")
+
+            transfers = review.get("rival_transfers", [])
+            if transfers:
+                lines += ["", "Rival moves:"]
+                for t in transfers:
+                    in_str = ", ".join(t["in"]) or "nothing"
+                    out_str = ", ".join(t["out"]) or "nothing"
+                    lines.append(f"- {t['manager_name']}: {in_str} in, {out_str} out")
+
+            for w in review.get("widely_bought", []):
+                lines.append(f"{w['rival_count']} of your rivals bought {w['player']} this week.")
+    except Exception as exc:
+        logger.warning("FPL GW review: differential report failed for GW%d: %s", gw, exc)
+
     await send_formatted(context.bot, _UID, "\n".join(lines))
 
 
@@ -381,6 +415,7 @@ async def _sync_passed_deadlines(conn, data: dict) -> None:
             "transfers": eh.get("event_transfers"),
             "transfer_cost": eh.get("event_transfers_cost"),
             "chip": picks_data.get("active_chip"),
+            "points_on_bench": eh.get("points_on_bench"),
         })
         mark_notification_sent(conn, gw, "picks_synced", now_utc().isoformat())
         logger.info("FPL: synced picks/history for GW%d", gw)
@@ -402,6 +437,97 @@ async def _sync_passed_deadlines(conn, data: dict) -> None:
                     )
             except Exception as exc:
                 logger.warning("FPL money sanity check errored for GW%d, skipping: %s", gw, exc)
+
+    await _sync_rivals(conn)
+
+
+# ── Rival sync — PHASE3-BRIEF.md Step 4 / PHASE3-ADDENDUM.md §0 ────────────
+
+
+async def _sync_rivals(conn) -> None:
+    """Rival squads pulled live every gameweek, exactly like Ollie's own —
+    §0 is explicit that a static fixture would be wrong within days and
+    silently so. Runs from _sync_passed_deadlines so it shares that
+    function's 5-minute cadence; every step here is safe to re-run — a row
+    that already exists is left alone (picks are public and immutable once
+    a deadline passes) and a per-rival failure just retries next tick."""
+    try:
+        league_data = await fpl_client.league(config.FPL_LEAGUE_ID)
+    except fpl_client.FPLError as exc:
+        logger.warning("FPL rival sync: standings unavailable, skipping this tick: %s", exc)
+        return
+
+    results = league_data.get("standings", {}).get("results", [])
+    known_started_event = {r["entry_id"]: r["started_event"] for r in get_all_rivals(conn)}
+
+    rows = []
+    for r in results:
+        entry_id = r["entry"]
+        if entry_id == config.FPL_TEAM_ID:
+            continue  # that's Ollie himself, not a rival
+        started_event = known_started_event.get(entry_id)
+        if started_event is None:
+            # Brand new rival — the standings page doesn't carry this, and it's
+            # the one fact backfill needs (§0: drive it off started_event, not
+            # off when they first showed up in the standings).
+            try:
+                entry_info = await fpl_client.entry(entry_id)
+                started_event = entry_info.get("started_event")
+            except fpl_client.FPLError as exc:
+                logger.warning(
+                    "FPL rival sync: entry info unavailable for %d (%s), backfill will wait: %s",
+                    entry_id, r.get("player_name"), exc,
+                )
+        rows.append({
+            "entry_id": entry_id,
+            "entry_name": r.get("entry_name"),
+            "player_name": r.get("player_name"),
+            "started_event": started_event,
+        })
+
+    sync_rivals_from_standings(conn, rows)
+
+    now = now_utc()
+    finished_gws = [
+        g["gw"] for g in get_all_gameweeks(conn) if fpl_client.parse_utc(g["deadline_utc"]) < now
+    ]
+    for rival in get_active_rivals(conn):
+        entry_id = rival["entry_id"]
+        start = rival["started_event"] or 1
+        for gw in finished_gws:
+            if gw < start or has_rival_picks(conn, gw, entry_id):
+                continue
+            try:
+                await _sync_one_rival_gw(conn, entry_id, gw)
+            except Exception as exc:
+                logger.warning(
+                    "FPL rival sync: GW%d failed for entry %d (%s), will retry next tick: %s",
+                    gw, entry_id, rival.get("player_name"), exc,
+                )
+
+
+async def _sync_one_rival_gw(conn, entry_id: int, gw: int) -> None:
+    picks_data = await fpl_client.picks(entry_id, gw)
+    if picks_data is None:
+        return  # not available yet — normal pre-deadline state, retried next tick
+
+    rows = [
+        {"element_id": p["element"], "multiplier": p["multiplier"]}
+        for p in picks_data.get("picks", [])
+    ]
+    replace_rival_picks(conn, gw, entry_id, rows)
+
+    eh = picks_data.get("entry_history", {})
+    upsert_rival_history(conn, {
+        "gw": gw,
+        "entry_id": entry_id,
+        "points": eh.get("points"),
+        "total_points": eh.get("total_points"),
+        "rank": eh.get("overall_rank"),
+        "chip": picks_data.get("active_chip"),
+        "points_on_bench": eh.get("points_on_bench"),
+    })
+    logger.info("FPL: synced rival picks/history for entry %d, GW%d", entry_id, gw)
 
 
 # ── Tick ──────────────────────────────────────────────────────────────────────

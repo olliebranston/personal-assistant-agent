@@ -455,9 +455,60 @@ CREATE TABLE IF NOT EXISTS my_history (
     team_value      INTEGER,
     transfers       INTEGER,
     transfer_cost   INTEGER,
-    chip            TEXT
+    chip            TEXT,
+    points_on_bench INTEGER
 )
 """
+
+RIVALS_DDL = """
+CREATE TABLE IF NOT EXISTS rivals (
+    entry_id        INTEGER PRIMARY KEY,
+    entry_name      TEXT,
+    player_name     TEXT,
+    started_event   INTEGER,
+    active          INTEGER NOT NULL DEFAULT 1
+)
+"""
+
+RIVAL_PICKS_DDL = """
+CREATE TABLE IF NOT EXISTS rival_picks (
+    gw              INTEGER NOT NULL,
+    entry_id        INTEGER NOT NULL,
+    element_id      INTEGER NOT NULL,
+    multiplier      INTEGER NOT NULL,
+    PRIMARY KEY (gw, entry_id, element_id)
+)
+"""
+
+RIVAL_HISTORY_DDL = """
+CREATE TABLE IF NOT EXISTS rival_history (
+    gw              INTEGER NOT NULL,
+    entry_id        INTEGER NOT NULL,
+    points          INTEGER,
+    total_points    INTEGER,
+    rank            INTEGER,
+    chip            TEXT,
+    points_on_bench INTEGER,
+    PRIMARY KEY (gw, entry_id)
+)
+"""
+
+# Existing assistant.db files predate points_on_bench on my_history (added
+# for PHASE3-ADDENDUM.md §B's captain/bench/squad decomposition) — same
+# idempotent-ALTER pattern as FOOD_LOG_MIGRATIONS above.
+MY_HISTORY_MIGRATIONS = (
+    "ALTER TABLE my_history ADD COLUMN points_on_bench INTEGER",
+)
+
+
+def migrate_my_history(conn: sqlite3.Connection) -> None:
+    """Idempotent: add points_on_bench to an existing my_history table if missing."""
+    for ddl in MY_HISTORY_MIGRATIONS:
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    conn.commit()
 
 PLAYER_SNAPSHOT_DDL = """
 CREATE TABLE IF NOT EXISTS player_snapshots (
@@ -575,19 +626,21 @@ def get_latest_my_picks_gw(conn: sqlite3.Connection) -> int | None:
 
 def upsert_my_history(conn: sqlite3.Connection, row: dict) -> None:
     """Insert or replace one GW's row. Keys: gw, points, total_points, overall_rank,
-    bank, team_value, transfers, transfer_cost, chip."""
+    bank, team_value, transfers, transfer_cost, chip, points_on_bench."""
+    row = {**row, "points_on_bench": row.get("points_on_bench")}
     conn.execute(
-        """INSERT INTO my_history (gw, points, total_points, overall_rank, bank, team_value, transfers, transfer_cost, chip)
-           VALUES (:gw, :points, :total_points, :overall_rank, :bank, :team_value, :transfers, :transfer_cost, :chip)
+        """INSERT INTO my_history (gw, points, total_points, overall_rank, bank, team_value, transfers, transfer_cost, chip, points_on_bench)
+           VALUES (:gw, :points, :total_points, :overall_rank, :bank, :team_value, :transfers, :transfer_cost, :chip, :points_on_bench)
            ON CONFLICT(gw) DO UPDATE SET
-               points        = excluded.points,
-               total_points  = excluded.total_points,
-               overall_rank  = excluded.overall_rank,
-               bank          = excluded.bank,
-               team_value    = excluded.team_value,
-               transfers     = excluded.transfers,
-               transfer_cost = excluded.transfer_cost,
-               chip          = excluded.chip""",
+               points          = excluded.points,
+               total_points    = excluded.total_points,
+               overall_rank    = excluded.overall_rank,
+               bank            = excluded.bank,
+               team_value      = excluded.team_value,
+               transfers       = excluded.transfers,
+               transfer_cost   = excluded.transfer_cost,
+               chip            = excluded.chip,
+               points_on_bench = excluded.points_on_bench""",
         row,
     )
     conn.commit()
@@ -600,6 +653,143 @@ def get_my_history(conn: sqlite3.Connection, gw: int) -> dict | None:
 
 def get_all_my_history(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute("SELECT * FROM my_history ORDER BY gw").fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Mini-league rivals — PHASE3-BRIEF.md Step 4 / PHASE3-ADDENDUM.md §0.
+#
+# Rival squad data is never a fixture in production — it's pulled live from
+# the API every gameweek by bot/fpl_jobs.py, exactly like Ollie's own picks.
+# ---------------------------------------------------------------------------
+
+
+def sync_rivals_from_standings(conn: sqlite3.Connection, rows: list[dict]) -> list[int]:
+    """Full membership refresh from live leagues-classic/{id}/standings/.
+
+    Each row: {entry_id, entry_name, player_name, started_event}. Anyone in
+    `rows` is (re)activated with fresh name/started_event; anyone currently
+    active but absent from `rows` is marked inactive, never deleted — a
+    departed manager's historical picks stay meaningful. Membership is
+    re-read every week, not cached, since managers join and leave mid-season.
+
+    Returns the entry_ids that are newly active this call (i.e. either brand
+    new or reactivated) so the caller knows who might need a backfill.
+    """
+    existing_active = {
+        r["entry_id"] for r in conn.execute("SELECT entry_id FROM rivals WHERE active = 1").fetchall()
+    }
+    now_ids = {r["entry_id"] for r in rows}
+    for r in rows:
+        conn.execute(
+            """INSERT INTO rivals (entry_id, entry_name, player_name, started_event, active)
+               VALUES (:entry_id, :entry_name, :player_name, :started_event, 1)
+               ON CONFLICT(entry_id) DO UPDATE SET
+                   entry_name    = excluded.entry_name,
+                   player_name   = excluded.player_name,
+                   started_event = excluded.started_event,
+                   active        = 1""",
+            r,
+        )
+    if now_ids:
+        placeholders = ",".join("?" * len(now_ids))
+        conn.execute(f"UPDATE rivals SET active = 0 WHERE entry_id NOT IN ({placeholders})", tuple(now_ids))
+    else:
+        conn.execute("UPDATE rivals SET active = 0")
+    conn.commit()
+    return sorted(now_ids - existing_active)
+
+
+def get_active_rivals(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute("SELECT * FROM rivals WHERE active = 1 ORDER BY entry_id").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_all_rivals(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute("SELECT * FROM rivals ORDER BY entry_id").fetchall()
+    return [dict(r) for r in rows]
+
+
+def replace_rival_picks(conn: sqlite3.Connection, gw: int, entry_id: int, rows: list[dict]) -> None:
+    """Each row: {element_id, multiplier}. A gameweek's picks are public and
+    immutable once its deadline passes — this is only ever called once per
+    (gw, entry_id) in practice, but overwrites rather than assumes that."""
+    conn.execute("DELETE FROM rival_picks WHERE gw = ? AND entry_id = ?", (gw, entry_id))
+    conn.executemany(
+        """INSERT INTO rival_picks (gw, entry_id, element_id, multiplier)
+           VALUES (:gw, :entry_id, :element_id, :multiplier)""",
+        [{**r, "gw": gw, "entry_id": entry_id} for r in rows],
+    )
+    conn.commit()
+
+
+def has_rival_picks(conn: sqlite3.Connection, gw: int, entry_id: int) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM rival_picks WHERE gw = ? AND entry_id = ? LIMIT 1", (gw, entry_id)
+    ).fetchone()
+    return row is not None
+
+
+def get_rival_picks(conn: sqlite3.Connection, gw: int, entry_id: int | None = None) -> list[dict]:
+    if entry_id is not None:
+        rows = conn.execute(
+            "SELECT * FROM rival_picks WHERE gw = ? AND entry_id = ?", (gw, entry_id)
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM rival_picks WHERE gw = ?", (gw,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_latest_rival_picks_gw(conn: sqlite3.Connection) -> int | None:
+    """The most recent gameweek any rival picks have synced for — the
+    reference point for template holes / differentials / captain-above
+    queries, since a given gameweek's rival picks only exist once that
+    gameweek's own deadline has passed."""
+    row = conn.execute("SELECT MAX(gw) AS gw FROM rival_picks").fetchone()
+    return row["gw"] if row and row["gw"] is not None else None
+
+
+def get_latest_rival_picks_gw_before(conn: sqlite3.Connection, entry_id: int, gw: int) -> int | None:
+    """The most recent gameweek strictly before `gw` this rival has stored
+    picks for — used to diff two consecutive squads for rival_transfers."""
+    row = conn.execute(
+        "SELECT MAX(gw) AS gw FROM rival_picks WHERE entry_id = ? AND gw < ?", (entry_id, gw)
+    ).fetchone()
+    return row["gw"] if row and row["gw"] is not None else None
+
+
+def upsert_rival_history(conn: sqlite3.Connection, row: dict) -> None:
+    """Keys: gw, entry_id, points, total_points, rank, chip, points_on_bench."""
+    conn.execute(
+        """INSERT INTO rival_history (gw, entry_id, points, total_points, rank, chip, points_on_bench)
+           VALUES (:gw, :entry_id, :points, :total_points, :rank, :chip, :points_on_bench)
+           ON CONFLICT(gw, entry_id) DO UPDATE SET
+               points          = excluded.points,
+               total_points    = excluded.total_points,
+               rank            = excluded.rank,
+               chip            = excluded.chip,
+               points_on_bench = excluded.points_on_bench""",
+        row,
+    )
+    conn.commit()
+
+
+def get_rival_history_row(conn: sqlite3.Connection, gw: int, entry_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM rival_history WHERE gw = ? AND entry_id = ?", (gw, entry_id)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_rival_history_for_entry(conn: sqlite3.Connection, entry_id: int) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM rival_history WHERE entry_id = ? ORDER BY gw", (entry_id,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_rival_history_for_gw(conn: sqlite3.Connection, gw: int) -> list[dict]:
+    rows = conn.execute("SELECT * FROM rival_history WHERE gw = ?", (gw,)).fetchall()
     return [dict(r) for r in rows]
 
 

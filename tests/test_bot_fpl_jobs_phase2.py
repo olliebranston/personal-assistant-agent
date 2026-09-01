@@ -17,6 +17,9 @@ from storage.models import (
     NOTIFICATIONS_SENT_DDL,
     PLAYER_SNAPSHOT_DDL,
     PREFERENCE_DDL,
+    RIVAL_HISTORY_DDL,
+    RIVAL_PICKS_DDL,
+    RIVALS_DDL,
     XP_PREDICTION_DDL,
     replace_my_picks,
 )
@@ -30,7 +33,7 @@ def _make_conn() -> sqlite3.Connection:
     for ddl in (
         GAMEWEEK_DDL, MY_PICKS_DDL, MY_HISTORY_DDL, PLAYER_SNAPSHOT_DDL,
         NOTIFICATIONS_SENT_DDL, ACKNOWLEDGEMENTS_DDL, XP_PREDICTION_DDL,
-        PREFERENCE_DDL, GAMEWEEK_SHAPE_DDL,
+        PREFERENCE_DDL, GAMEWEEK_SHAPE_DDL, RIVALS_DDL, RIVAL_PICKS_DDL, RIVAL_HISTORY_DDL,
     ):
         conn.execute(ddl)
     conn.commit()

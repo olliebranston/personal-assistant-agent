@@ -16,10 +16,14 @@ from storage.models import (
     NOTIFICATIONS_SENT_DDL,
     PLAYER_SNAPSHOT_DDL,
     PREFERENCE_DDL,
+    RIVAL_HISTORY_DDL,
+    RIVAL_PICKS_DDL,
+    RIVALS_DDL,
     USER_FOOD_DDL,
     WEIGHT_LOG_DDL,
     XP_PREDICTION_DDL,
     migrate_food_logs,
+    migrate_my_history,
 )
 
 DB_PATH = Path("assistant.db")
@@ -56,6 +60,10 @@ def init_db() -> None:
     conn.execute(XP_PREDICTION_DDL)
     conn.execute(PREFERENCE_DDL)
     conn.execute(GAMEWEEK_SHAPE_DDL)
+    conn.execute(RIVALS_DDL)
+    conn.execute(RIVAL_PICKS_DDL)
+    conn.execute(RIVAL_HISTORY_DDL)
     conn.commit()
     migrate_food_logs(conn)
+    migrate_my_history(conn)
     conn.close()

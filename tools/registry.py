@@ -90,6 +90,7 @@ def build_tool_registry(
         "get_fpl_squad": functools.partial(fpl.get_fpl_squad, conn),
         "get_fpl_team": functools.partial(fpl.get_fpl_team, conn),
         "get_fpl_league": functools.partial(fpl.get_fpl_league, conn),
+        "get_fpl_gw_review": functools.partial(fpl.get_fpl_gw_review, conn),
         "get_fpl_chips": functools.partial(fpl.get_fpl_chips, conn),
         "get_fpl_calendar": functools.partial(fpl.get_fpl_calendar, conn),
         "get_fpl_recommendation": functools.partial(fpl.get_fpl_recommendation, conn),

@@ -153,7 +153,13 @@ commentary beyond what the tool returned.
 
 FPL KNOWLEDGE (static facts — don't call a tool for these)
 - get_fpl_squad -> '/fpl' or general status. get_fpl_team -> '/fpl team' \
-(squad only, by position). get_fpl_league -> '/fpl league'. get_fpl_chips \
+(squad only, by position). get_fpl_league -> '/fpl league', 'what does \
+everyone else own', or 'has anyone used a chip' (mini-league table plus, \
+once rival data has synced, differentials/template holes/captains-above/ \
+chips-used — see below). get_fpl_gw_review -> 'why did I lose to X this \
+week' or 'what happened in the league' (pass the gw); needs that \
+gameweek's points and rival picks already synced, so relay its error \
+plainly rather than guessing if it's too soon. get_fpl_chips \
 -> '/fpl chips' or 'when should I use my chips' (it already includes a \
 chip-timing signal — don't also call get_fpl_calendar for that question). \
 get_fpl_calendar -> 'any blanks coming up' or double-gameweek questions. \
@@ -162,6 +168,20 @@ captain X', or any transfer question — pass force_in/force_out (player \
 names) when Ollie states a preference, e.g. 'get me Palmer in'. \
 fpl_acknowledge -> '/fpl done' or any confirmation that transfers are \
 sorted for the week.
+- get_fpl_league's `my_differentials`/`template_holes`/`captains_above`/ \
+`chips_used_by_rivals` only appear once rival squad data has synced — \
+that's normal in the early days of a gameweek (rivals' picks aren't public \
+until their own deadline passes, same as Ollie's), not a bug. Say plainly \
+that mini-league data isn't in yet rather than guessing at it.
+- get_fpl_gw_review's captain/bench/squad `decomposition` already has its \
+`detail` text written — paraphrase it, don't recompute or restate the \
+numbers yourself. Its three deltas always sum exactly to the real points \
+gap; if you state the gap, it should match.
+- get_fpl_recommendation's `captain.rationale` may include a league-EO \
+tiebreak note (only appears when the raw-xP margin wasn't clear) — that's \
+the solver choosing to match or differentiate from the mini-league field \
+per FPL-CONTEXT.md §2.3, not a change you should second-guess or explain \
+away.
 - get_fpl_chips's `signal.plan` already names a concrete target gameweek per \
 remaining chip where one could be computed (e.g. "Wildcard: aim for GW7 \
 (...)") — lead with that, don't just say "use it GW5-9". Say plainly that \

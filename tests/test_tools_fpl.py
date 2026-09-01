@@ -16,6 +16,9 @@ from storage.models import (
     MY_PICKS_DDL,
     NOTIFICATIONS_SENT_DDL,
     PLAYER_SNAPSHOT_DDL,
+    RIVAL_HISTORY_DDL,
+    RIVAL_PICKS_DDL,
+    RIVALS_DDL,
     get_gameweek,
     get_my_picks,
     is_acknowledged,
@@ -46,6 +49,9 @@ def _make_conn() -> sqlite3.Connection:
     conn.execute(PLAYER_SNAPSHOT_DDL)
     conn.execute(NOTIFICATIONS_SENT_DDL)
     conn.execute(ACKNOWLEDGEMENTS_DDL)
+    conn.execute(RIVALS_DDL)
+    conn.execute(RIVAL_PICKS_DDL)
+    conn.execute(RIVAL_HISTORY_DDL)
     conn.commit()
     return conn
 

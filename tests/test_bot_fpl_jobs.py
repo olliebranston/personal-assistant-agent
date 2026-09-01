@@ -22,6 +22,9 @@ from storage.models import (
     MY_PICKS_DDL,
     NOTIFICATIONS_SENT_DDL,
     PLAYER_SNAPSHOT_DDL,
+    RIVAL_HISTORY_DDL,
+    RIVAL_PICKS_DDL,
+    RIVALS_DDL,
     get_my_history,
     get_my_picks,
     mark_notification_sent,
@@ -50,7 +53,10 @@ class _NoCloseConn:
 def _make_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
-    for ddl in (GAMEWEEK_DDL, MY_PICKS_DDL, MY_HISTORY_DDL, PLAYER_SNAPSHOT_DDL, NOTIFICATIONS_SENT_DDL, ACKNOWLEDGEMENTS_DDL):
+    for ddl in (
+        GAMEWEEK_DDL, MY_PICKS_DDL, MY_HISTORY_DDL, PLAYER_SNAPSHOT_DDL, NOTIFICATIONS_SENT_DDL,
+        ACKNOWLEDGEMENTS_DDL, RIVALS_DDL, RIVAL_PICKS_DDL, RIVAL_HISTORY_DDL,
+    ):
         conn.execute(ddl)
     conn.commit()
     return conn
