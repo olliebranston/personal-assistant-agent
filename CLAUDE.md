@@ -7,9 +7,12 @@ assistant for gym, nutrition, calendar, and news. Single LLM orchestrator
 domain logic lives in deterministic `tools/*.py` modules, not in prompts.
 SQLite storage (`assistant.db`), schema/CRUD in `storage/models.py`.
 
-See `CONTEXT.md`, `Gym-CONTEXT.md`, `Mealplan-CONTEXT.md` for domain
-knowledge (goals, macro targets, training split) and `TOOL_CALLING_DESIGN.md`
-for the tool-calling architecture.
+See `Gym-CONTEXT.md`, `Mealplan-CONTEXT.md` for domain knowledge (goals,
+macro targets, training split) and `TOOL_CALLING_DESIGN.md` for the
+tool-calling architecture. Robin's persona/tone and in-chat domain knowledge
+(portion-size defaults, calendar confirmation wording, etc.) live in
+`main.py`'s system prompt (`_ROBIN_SYSTEM`) — that's the source of truth,
+not a second copy in a docs file.
 
 ## Stack
 - python-telegram-bot v21 (polling)
@@ -32,6 +35,13 @@ for the tool-calling architecture.
   `services/nutrition.lookup_macros` (user calibration table → USDA →
   fallback table) so values stay verifiable.
 
+## Working Style
+- Build the simplest version first, then extend deliberately — don't
+  over-engineer up front.
+- Flag shortcuts vs. proper approaches when there's a tradeoff worth calling out.
+- Explain non-obvious code as it's being written.
+
 ## Common Commands
 - Run tests: `python -m pytest tests/ -v`
+- Lint: `ruff check .`
 - Start bot locally: `python main.py`
