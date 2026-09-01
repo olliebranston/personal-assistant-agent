@@ -12,16 +12,16 @@ import json
 import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from zoneinfo import ZoneInfo
 
 import pytest
 
-from agents.meal import CALORIE_TARGETS, PROTEIN_TARGET_G
+import config
+from services.meal_helpers import CALORIE_TARGETS, PROTEIN_TARGET_G
 from services import openrouter
 from storage.models import EXERCISE_SET_DDL, FOOD_LOG_DDL, GYM_SESSION_DDL, WEIGHT_LOG_DDL
 from tools.context import build_ambient_context
 
-_TZ = ZoneInfo("Europe/London")
+_TZ = config.TZ
 
 
 # ── Mock OpenRouter response helpers ────────────────────────────────────────

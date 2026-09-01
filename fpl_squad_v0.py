@@ -15,7 +15,10 @@ Usage:
     python3 fpl_squad_v0.py                       # unconstrained optimum
     python3 fpl_squad_v0.py --force Haaland Palmer --min-club CHE=2
 """
-import argparse, collections, csv, sys
+import argparse
+import collections
+import csv
+import sys
 import pulp
 
 POS = {'1': 'GK', '2': 'DEF', '3': 'MID', '4': 'FWD'}

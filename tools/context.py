@@ -11,15 +11,14 @@ from __future__ import annotations
 import datetime
 import logging
 import sqlite3
-from zoneinfo import ZoneInfo
 
-from agents.meal import CALORIE_TARGETS, PROTEIN_TARGET_G
+import config
+from services.meal_helpers import CALORIE_TARGETS, PROTEIN_TARGET_G, is_weights_day
 from storage.models import get_daily_totals, get_latest_weight, get_recent_sessions
 
 logger = logging.getLogger(__name__)
 
-_TZ = ZoneInfo("Europe/London")
-_WEIGHTS_SESSION_TYPES = ("push", "pull", "legs")
+_TZ = config.TZ
 
 
 def build_ambient_context(conn: sqlite3.Connection) -> dict:
@@ -45,7 +44,7 @@ def build_ambient_context(conn: sqlite3.Connection) -> dict:
 def _daily_macros(conn: sqlite3.Connection, today: str) -> dict:
     try:
         totals = get_daily_totals(conn, today)
-        kcal_target = CALORIE_TARGETS["weights"] if _is_weights_day(conn, today) else CALORIE_TARGETS["rest"]
+        kcal_target = CALORIE_TARGETS["weights"] if is_weights_day(conn, today) else CALORIE_TARGETS["rest"]
         return {
             "protein_g": totals["protein_g"],
             "kcal": totals["kcal"],
@@ -60,13 +59,6 @@ def _daily_macros(conn: sqlite3.Connection, today: str) -> dict:
             "protein_target_g": PROTEIN_TARGET_G,
             "kcal_target": CALORIE_TARGETS["rest"],
         }
-
-
-def _is_weights_day(conn: sqlite3.Connection, today: str) -> bool:
-    for session in get_recent_sessions(conn, limit=5):
-        if session["date"] == today and session["session_type"] in _WEIGHTS_SESSION_TYPES:
-            return True
-    return False
 
 
 def _last_workout(conn: sqlite3.Connection) -> dict | None:

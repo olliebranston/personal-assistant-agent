@@ -11,10 +11,11 @@ import random
 import re
 import sqlite3
 from datetime import date as _date, datetime, timedelta
-from zoneinfo import ZoneInfo
 
+import config
 from data.meals import BREAKFAST_ROTATION, LUNCH_ROTATIONS, WEEKDAY_DINNERS, WEEKEND_DINNERS
 from data.recipes import RECIPES, find_recipe, get_recipes_by_category
+from services.meal_helpers import CALORIE_TARGETS, PROTEIN_TARGET_G, is_weights_day
 from services.nutrition import lookup_macros
 from storage.models import (
     FoodLog,
@@ -23,7 +24,6 @@ from storage.models import (
     get_daily_totals,
     get_food_logs_for_date,
     get_recent_recipe_slugs,
-    get_recent_sessions,
     get_user_food,
     get_week_logs,
     get_weight_history,
@@ -36,20 +36,13 @@ from storage.models import (
 
 logger = logging.getLogger(__name__)
 
-_TZ = ZoneInfo("Europe/London")
+_TZ = config.TZ
 
 
 def _today() -> _date:
     """Today's date in Europe/London — never bare date.today() (server may run in a different tz)."""
     return datetime.now(tz=_TZ).date()
 
-
-PROTEIN_TARGET_G = 230
-CALORIE_TARGETS = {
-    "weights": 3300,
-    "rest": 2950,
-    "default": 3150,
-}
 
 _DINNER_CATEGORIES = ("weekday_dinner", "weekend_dinner")
 _BATCH_CATEGORIES = [
@@ -65,16 +58,9 @@ _DINNER_SLOT_BY_WEEKDAY_NAME = {
 }
 
 
-def _is_weights_day(conn: sqlite3.Connection, date_str: str) -> bool:
-    for session in get_recent_sessions(conn, limit=5):
-        if session["date"] == date_str and session["session_type"] in ("push", "pull", "legs"):
-            return True
-    return False
-
-
 def _daily_macros_dict(conn: sqlite3.Connection, date_str: str) -> dict:
     totals = get_daily_totals(conn, date_str)
-    is_weights = _is_weights_day(conn, date_str)
+    is_weights = is_weights_day(conn, date_str)
     kcal_target = CALORIE_TARGETS["weights"] if is_weights else CALORIE_TARGETS["rest"]
     return {
         "date": date_str,
@@ -367,11 +353,11 @@ async def delete_food_log(
             return {"error": "no food logged today"}
 
         if log_id is not None:
-            target = next((l for l in logs if l["id"] == log_id), None)
+            target = next((entry for entry in logs if entry["id"] == log_id), None)
             if target is None:
                 return {"error": f"no entry with id {log_id} logged today"}
         elif food_name:
-            matches = [l for l in logs if _matches_at_word_start(food_name, l["description"])]
+            matches = [entry for entry in logs if _matches_at_word_start(food_name, entry["description"])]
             if not matches:
                 return {"error": f"no matching entry found for '{food_name}'"}
             if len(matches) > 1:
@@ -438,7 +424,7 @@ async def repeat_meal(
     try:
         src_date = source_date or (_today() - timedelta(days=1)).isoformat()
         source_logs = get_food_logs_for_date(conn, src_date)
-        items = [l for l in source_logs if l["meal_slot"] == meal_slot]
+        items = [entry for entry in source_logs if entry["meal_slot"] == meal_slot]
         if not items:
             return {"error": f"no {meal_slot} logged on {src_date}"}
 

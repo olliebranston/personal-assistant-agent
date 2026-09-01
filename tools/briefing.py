@@ -10,9 +10,9 @@ from __future__ import annotations
 import logging
 import sqlite3
 from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
 
-from agents.meal import CALORIE_TARGETS, PROTEIN_TARGET_G
+import config
+from services.meal_helpers import CALORIE_TARGETS, PROTEIN_TARGET_G
 from tools.calendar import get_calendar_events
 from tools.gym import get_last_session, get_next_session_type
 from tools.meal import get_daily_macros
@@ -20,7 +20,7 @@ from tools.news import get_news
 
 logger = logging.getLogger(__name__)
 
-_TZ = ZoneInfo("Europe/London")
+_TZ = config.TZ
 
 _DEFAULT_NUTRITION = {
     "yesterday_protein_g": 0.0,

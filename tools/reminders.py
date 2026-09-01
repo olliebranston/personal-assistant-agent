@@ -10,13 +10,13 @@ from __future__ import annotations
 import logging
 import sqlite3
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
+import config
 from utils.telegram_format import send_formatted
 
 logger = logging.getLogger(__name__)
 
-_TZ = ZoneInfo("Europe/London")
+_TZ = config.TZ
 
 
 async def create_reminder(
@@ -45,7 +45,15 @@ async def create_reminder(
     async def _fire(ctx):
         await send_formatted(ctx.bot, chat_id, f"Reminder: {text}")
 
-    telegram_context.job_queue.run_once(_fire, when=delay)
+    try:
+        telegram_context.job_queue.run_once(_fire, when=delay)
+    except Exception as exc:
+        # Every other tool in this codebase returns {"error": ...} on failure
+        # instead of letting an exception reach the LLM as a raw traceback —
+        # this call was the one exception, left unguarded when create_reminder
+        # was written.
+        logger.warning("create_reminder: job_queue.run_once failed: %s", exc)
+        return {"error": str(exc)}
 
     logger.info("Reminder scheduled: '%s' at %s (in %.0fs)", text, fire_at.isoformat(), delay)
     return {

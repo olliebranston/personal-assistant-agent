@@ -12,14 +12,14 @@ import logging
 import sqlite3
 import time
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
+import config
 from services import news as news_svc
 from tools.calendar import get_calendar_events
 
 logger = logging.getLogger(__name__)
 
-_TZ = ZoneInfo("Europe/London")
+_TZ = config.TZ
 
 
 async def _safe_fetch(coro, default, name: str):

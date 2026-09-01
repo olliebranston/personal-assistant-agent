@@ -414,7 +414,6 @@ async def test_early_season_low_minutes_player_is_a_valid_transfer_target(_wired
     this is the exact scenario that was broken live at GW3."""
     conn, bootstrap, fixtures = _wired
     squad = _seed_current_squad(conn, bootstrap)
-    elements = {e["id"]: e for e in bootstrap["elements"]}
 
     # Drop every non-owned player's minutes to an early-GW3-realistic figure.
     for el in bootstrap["elements"]:

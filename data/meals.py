@@ -1,4 +1,4 @@
-"""Meal rotation data (from Mealplan-CONTEXT.md) — shared by agents/meal.py and tools/meal.py."""
+"""Meal rotation data (from Mealplan-CONTEXT.md) — shared by services/meal_helpers.py and tools/meal.py."""
 
 from __future__ import annotations
 

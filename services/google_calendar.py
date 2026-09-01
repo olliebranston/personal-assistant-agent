@@ -14,7 +14,7 @@ import config
 logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
-_TZ = "Europe/London"
+_TZ = config.TZ_NAME
 
 # Preferred calendar names for event creation, in priority order.
 _WRITE_PREFERENCE = ["Social", "Personal"]

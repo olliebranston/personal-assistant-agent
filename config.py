@@ -1,9 +1,18 @@
 """Loads and exposes all environment variables. Import this everywhere instead of os.getenv directly."""
 
 import os
+from zoneinfo import ZoneInfo
+
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Single source of truth for the bot's operating timezone — every tool/job
+# used to independently define its own `_TZ = ZoneInfo("Europe/London")`.
+# TZ_NAME (a plain string) exists because the Google Calendar API's
+# timeZone field wants a string, not a tzinfo object.
+TZ_NAME: str = "Europe/London"
+TZ: ZoneInfo = ZoneInfo(TZ_NAME)
 
 TELEGRAM_BOT_TOKEN: str = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_ALLOWED_USER_ID: int = int(os.environ["TELEGRAM_ALLOWED_USER_ID"])

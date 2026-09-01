@@ -11,10 +11,8 @@ import logging
 import re
 import sqlite3
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
-_TZ = ZoneInfo("Europe/London")
-
+import config
 from storage.models import (
     ExerciseSet,
     GymSession,
@@ -24,6 +22,8 @@ from storage.models import (
     insert_session,
     insert_set,
 )
+
+_TZ = config.TZ
 
 logger = logging.getLogger(__name__)
 

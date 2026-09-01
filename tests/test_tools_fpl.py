@@ -20,7 +20,6 @@ from storage.models import (
     RIVAL_PICKS_DDL,
     RIVALS_DDL,
     get_gameweek,
-    get_my_picks,
     is_acknowledged,
     replace_my_picks,
 )
