@@ -258,6 +258,20 @@ def update_food_log(
     conn.commit()
 
 
+def delete_food_log(conn: sqlite3.Connection, log_id: int) -> bool:
+    """Delete one food log entry by id. Returns True if a row was removed."""
+    cur = conn.execute("DELETE FROM food_logs WHERE id = ?", (log_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_food_logs_for_date(conn: sqlite3.Connection, date: str) -> int:
+    """Delete every food log entry for a date. Returns the number of rows removed."""
+    cur = conn.execute("DELETE FROM food_logs WHERE date = ?", (date,))
+    conn.commit()
+    return cur.rowcount
+
+
 # ---------------------------------------------------------------------------
 # User-calibrated food DDL + CRUD
 # ---------------------------------------------------------------------------

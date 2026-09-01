@@ -17,6 +17,8 @@ from data.recipes import RECIPES, find_recipe, get_recipes_by_category
 from services.nutrition import lookup_macros
 from storage.models import (
     FoodLog,
+    delete_food_log as db_delete_food_log,
+    delete_food_logs_for_date,
     get_daily_totals,
     get_food_logs_for_date,
     get_recent_recipe_slugs,
@@ -82,6 +84,26 @@ def _daily_macros_dict(conn: sqlite3.Connection, date_str: str) -> dict:
         "protein_remaining": max(PROTEIN_TARGET_G - totals["protein_g"], 0),
         "kcal_remaining": max(kcal_target - totals["kcal"], 0),
         "is_weights_day": is_weights,
+        # Pre-formatted so the model relays it verbatim instead of re-summing
+        # protein_g/kcal itself in prose (that hand-computation was the actual
+        # cause of "today's total" mismatches — see main.py's meal prompt).
+        "summary_line": f"{totals['protein_g']:.0f}g protein / {totals['kcal']:.0f} kcal (target {kcal_target} kcal)",
+    }
+
+
+def _accumulate_turn_totals(turn_totals: dict | None, protein_g: float, kcal: float) -> dict | None:
+    """Add one item's macros to the caller-supplied turn-scoped total (bound
+    per incoming message via tools/registry.py, never part of the LLM-facing
+    schema) and return a ready-made summary. None if no turn_totals dict was
+    supplied (e.g. direct/test calls)."""
+    if turn_totals is None:
+        return None
+    turn_totals["protein_g"] += protein_g
+    turn_totals["kcal"] += kcal
+    return {
+        "protein_g": round(turn_totals["protein_g"], 1),
+        "kcal": round(turn_totals["kcal"], 0),
+        "summary_line": f"{turn_totals['protein_g']:.0f}g protein, {turn_totals['kcal']:.0f} kcal",
     }
 
 
@@ -139,8 +161,15 @@ async def log_food(
     food_name: str,
     grams: float,
     meal_slot: str | None = None,
+    turn_totals: dict | None = None,
 ) -> dict:
-    """Look up macros for a food and write it to today's log immediately (§5.1)."""
+    """Look up macros for a food and write it to today's log immediately (§5.1).
+
+    turn_totals is an optional dict (protein_g/kcal keys) bound per incoming
+    message by tools/registry.py — never part of the LLM-facing schema — used
+    to accumulate an exact "this turn" total across multiple log_food calls
+    without the model having to re-sum them itself.
+    """
     try:
         slot = meal_slot or "other"
         macros = await _lookup_with_user_override(conn, food_name, grams)
@@ -168,6 +197,7 @@ async def log_food(
             "source": macros["source"],
             "meal_slot": slot,
             "daily_totals": _daily_macros_dict(conn, today),
+            "turn_totals": _accumulate_turn_totals(turn_totals, macros["protein_g"], macros["kcal"]),
         }
         if macros["source"] == "estimated":
             # Total miss (pre-lookup, USDA, and the fallback table all failed) —
@@ -305,16 +335,96 @@ async def correct_food_log(
         return {"error": str(exc)}
 
 
+async def delete_food_log(
+    conn: sqlite3.Connection,
+    log_id: int | None = None,
+    food_name: str = "",
+) -> dict:
+    """Remove one food log entry entirely — for duplicates or mistaken
+    entries, never for correcting a value (use correct_food_log for that).
+
+    Prefer log_id (already visible from a prior log_food/get_food_log/
+    correct_food_log result) — it's exact and never ambiguous. If only
+    food_name is given and more than one of today's entries match, this
+    deliberately does NOT guess: it returns the candidates instead of
+    deleting anything, since guessing wrong on a delete is unrecoverable.
+    """
+    try:
+        today = _today().isoformat()
+        logs = get_food_logs_for_date(conn, today)
+        if not logs:
+            return {"error": "no food logged today"}
+
+        if log_id is not None:
+            target = next((l for l in logs if l["id"] == log_id), None)
+            if target is None:
+                return {"error": f"no entry with id {log_id} logged today"}
+        elif food_name:
+            needle = food_name.lower()
+            matches = [l for l in logs if needle in l["description"].lower()]
+            if not matches:
+                return {"error": f"no matching entry found for '{food_name}'"}
+            if len(matches) > 1:
+                return {
+                    "error": f"{len(matches)} entries match '{food_name}' — specify log_id",
+                    "candidates": [
+                        {"id": m["id"], "description": m["description"], "protein_g": m["protein_g"], "kcal": m["kcal"]}
+                        for m in matches
+                    ],
+                }
+            target = matches[0]
+        else:
+            return {"error": "provide log_id or food_name to identify which entry to delete"}
+
+        removed = {
+            "id": target["id"],
+            "description": target["description"],
+            "protein_g": target["protein_g"],
+            "kcal": target["kcal"],
+        }
+        db_delete_food_log(conn, target["id"])
+
+        return {
+            "deleted": True,
+            "removed": removed,
+            "daily_totals": _daily_macros_dict(conn, today),
+        }
+    except Exception as exc:
+        logger.warning("delete_food_log failed: %s", exc)
+        return {"error": str(exc)}
+
+
+async def reset_daily_food_log(conn: sqlite3.Connection, date: str | None = None) -> dict:
+    """Delete every food log entry for a date (defaults to today) — for
+    'scrap today's log, I'll start again'. Irreversible; the caller must
+    confirm with Ollie before invoking this."""
+    try:
+        d = date or _today().isoformat()
+        removed_count = delete_food_logs_for_date(conn, d)
+        return {
+            "reset": True,
+            "date": d,
+            "removed_count": removed_count,
+            "daily_totals": _daily_macros_dict(conn, d),
+        }
+    except Exception as exc:
+        logger.warning("reset_daily_food_log failed: %s", exc)
+        return {"error": str(exc)}
+
+
 async def repeat_meal(
     conn: sqlite3.Connection,
     meal_slot: str,
     source_date: str | None = None,
+    turn_totals: dict | None = None,
 ) -> dict:
     """Re-log a previous day's meal for a specific slot (e.g. 'same lunch as
     yesterday'). Matches strictly on meal_slot — never on recency or list
     position — so an unplanned snack logged after lunch can't get picked up
     as 'lunch' by mistake. Re-runs the nutrition lookup per item so any
-    calibration since source_date is picked up."""
+    calibration since source_date is picked up.
+
+    turn_totals — see log_food's docstring; same optional accumulator."""
     try:
         src_date = source_date or (_today() - timedelta(days=1)).isoformat()
         source_logs = get_food_logs_for_date(conn, src_date)
@@ -324,6 +434,8 @@ async def repeat_meal(
 
         today = _today().isoformat()
         logged_items = []
+        turn_protein = 0.0
+        turn_kcal = 0.0
         for item in items:
             food_name = item["food_name"] or _name_from_description(item["description"])
             grams = item["grams"] if item["grams"] is not None else _grams_from_description(item["description"])
@@ -347,6 +459,8 @@ async def repeat_meal(
                 "kcal": macros["kcal"],
                 "source": macros["source"],
             })
+            turn_protein += macros["protein_g"]
+            turn_kcal += macros["kcal"]
 
         return {
             "logged": True,
@@ -354,6 +468,7 @@ async def repeat_meal(
             "source_date": src_date,
             "items": logged_items,
             "daily_totals": _daily_macros_dict(conn, today),
+            "turn_totals": _accumulate_turn_totals(turn_totals, turn_protein, turn_kcal),
         }
     except Exception as exc:
         logger.warning("repeat_meal failed: %s", exc)
@@ -686,6 +801,59 @@ TOOL_SCHEMAS: list[dict] = [
                     },
                 },
                 "required": ["field", "new_value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_food_log",
+            "description": (
+                "Remove a food entry from today's log entirely — for a duplicate "
+                "logged by accident, or 'delete that', 'remove the yoghurt', 'that "
+                "wasn't meant to be logged'. NEVER use this to fix a wrong value — "
+                "that's correct_food_log. Prefer log_id when you have it (from a "
+                "recent log_food/get_food_log/correct_food_log result) since it's "
+                "exact. If you only have a name and more than one entry matches, "
+                "this returns the candidates instead of deleting anything — show "
+                "them to Ollie and ask which one rather than guessing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "log_id": {
+                        "type": ["integer", "null"],
+                        "description": "The exact entry id to delete, if known.",
+                    },
+                    "food_name": {
+                        "type": "string",
+                        "description": "Substring to match against today's entries, only used if log_id is omitted.",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reset_daily_food_log",
+            "description": (
+                "Delete EVERY food entry for a date (defaults to today) — for "
+                "'scrap today's log', 'restart today's total', 'clear everything "
+                "I've logged today'. Irreversible. Confirm with Ollie first "
+                "(state what will be wiped and wait for a yes), unless he's just "
+                "explicitly and unambiguously asked for exactly this."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": ["string", "null"],
+                        "description": "Date in YYYY-MM-DD format. Omit or null for today.",
+                    },
+                },
+                "required": [],
             },
         },
     },
