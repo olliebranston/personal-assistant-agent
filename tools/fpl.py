@@ -831,6 +831,7 @@ def _lineup_row(eid: int, elements: dict[int, dict], teams: dict[int, dict], fix
     el = elements[eid]
     return {
         "element": eid,
+        "name": el["web_name"],
         "pos": _OPT_POS[el["element_type"]],
         "fixture": _fixture_display(fixtures, el["team"], gw, teams),
         "difficulty": _fixture_difficulty(fixtures, el["team"], gw),
@@ -875,15 +876,17 @@ def _lineup_changes(
     changes = []
     for out_id, in_id in pairs:
         out_el, in_el = elements.get(out_id), elements.get(in_id)
+        out_name = out_el["web_name"] if out_el else str(out_id)
+        in_name = in_el["web_name"] if in_el else str(in_id)
         out_fix = _fixture_display(fixtures, out_el["team"], gw, teams) if out_el else "?"
         out_diff = _fixture_difficulty(fixtures, out_el["team"], gw) if out_el else None
         in_fix = _fixture_display(fixtures, in_el["team"], gw, teams) if in_el else "?"
         reason = (
-            f"{in_el['web_name'] if in_el else in_id} projects {_xp(in_id):.1f} xP ({in_fix}) vs "
-            f"{out_el['web_name'] if out_el else out_id}'s {_xp(out_id):.1f} xP "
+            f"{in_name} projects {_xp(in_id):.1f} xP ({in_fix}) vs "
+            f"{out_name}'s {_xp(out_id):.1f} xP "
             f"({out_fix}{f', difficulty {out_diff}' if out_diff is not None else ''})"
         )
-        changes.append({"in": in_id, "out": out_id, "reason": reason})
+        changes.append({"in": in_id, "in_name": in_name, "out": out_id, "out_name": out_name, "reason": reason})
     return changes
 
 
@@ -942,6 +945,7 @@ def _captain_section(
         el = elements[eid]
         return {
             "element": eid,
+            "name": el["web_name"],
             "xp": round(candidate_by_id[eid].horizon_xp, 1),
             "fixture": _fixture_display(fixtures, el["team"], gw, teams),
             "difficulty": _fixture_difficulty(fixtures, el["team"], gw),
@@ -974,9 +978,11 @@ def _captain_section(
 
     return {
         "pick": result.captain,
+        "pick_name": pick_el["web_name"],
         "xp": round(pick_xp, 1),
         "alternatives": alternatives,
         "vice": vice,
+        "vice_name": elements[vice]["web_name"],
         "rationale": rationale,
         "margin": margin,
     }
@@ -995,7 +1001,10 @@ def _pair_transfers(transfers_out: list[int], transfers_in: list[int], elements:
     pairs = []
     for pos, outs in out_by_pos.items():
         for o, i in zip(sorted(outs), sorted(in_by_pos.get(pos, []))):
-            pairs.append({"out": o, "in": i})
+            pairs.append({
+                "out": o, "out_name": elements[o]["web_name"],
+                "in": i, "in_name": elements[i]["web_name"],
+            })
     return pairs
 
 

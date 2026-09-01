@@ -377,7 +377,10 @@ def test_lineup_changes_detects_a_position_matched_bench_promotion():
     teams = {1: {"short_name": "T1"}, 2: {"short_name": "T2"}}
     candidate_by_id = {1: _cand(1, 1, "DEF", 2.0), 2: _cand(2, 2, "DEF", 6.0)}
     changes = fpl_tools._lineup_changes({1}, {2}, elements, candidate_by_id, [], teams, gw=1)
-    assert changes == [{"in": 2, "out": 1, "reason": "BenchPromo projects 6.0 xP (no fixture) vs Starter's 2.0 xP (no fixture)"}]
+    assert changes == [{
+        "in": 2, "in_name": "BenchPromo", "out": 1, "out_name": "Starter",
+        "reason": "BenchPromo projects 6.0 xP (no fixture) vs Starter's 2.0 xP (no fixture)",
+    }]
 
 
 def test_lineup_changes_pairs_across_positions_when_formation_shape_changes():
@@ -389,7 +392,10 @@ def test_lineup_changes_pairs_across_positions_when_formation_shape_changes():
     candidate_by_id = {1: _cand(1, 1, "DEF", 2.0), 2: _cand(2, 2, "MID", 6.0)}
     changes = fpl_tools._lineup_changes({1}, {2}, elements, candidate_by_id, [], teams, gw=1)
     assert len(changes) == 1
-    assert changes[0] == {"in": 2, "out": 1, "reason": changes[0]["reason"]}
+    assert changes[0]["in"] == 2
+    assert changes[0]["in_name"] == "PromotedMid"
+    assert changes[0]["out"] == 1
+    assert changes[0]["out_name"] == "DroppedDef"
 
 
 def test_lineup_section_formation_string_and_bench_ordering():
@@ -412,7 +418,7 @@ def test_lineup_section_formation_string_and_bench_ordering():
     )
     assert lineup["formation"] == "2-1-1"
     assert len(lineup["xi"]) == 5
-    assert lineup["bench"] == [{"element": 2, "pos": "GK", "fixture": "no fixture", "difficulty": None, "order": 1}]
+    assert lineup["bench"] == [{"element": 2, "name": "GK2", "pos": "GK", "fixture": "no fixture", "difficulty": None, "order": 1}]
 
 
 # ── get_fpl_recommendation ──────────────────────────────────────────────────
@@ -441,17 +447,23 @@ async def test_get_fpl_recommendation_returns_the_output_contract_shape(_wired):
     assert "hold" in option_ids  # §8: hold appears in every option set
     for opt in result["options"]:
         assert set(opt.keys()) == {"id", "label", "transfers", "xp_delta", "hit", "rationale"}
+        for pair in opt["transfers"]:
+            assert set(pair.keys()) == {"out", "out_name", "in", "in_name"}
     assert set(result["lineup"].keys()) == {"xi", "bench", "changes_from_current", "formation"}
     assert len(result["lineup"]["xi"]) == 11
     assert len(result["lineup"]["bench"]) == 4
     for row in result["lineup"]["xi"]:
-        assert set(row.keys()) == {"element", "pos", "fixture", "difficulty"}
+        assert set(row.keys()) == {"element", "name", "pos", "fixture", "difficulty"}
     for row in result["lineup"]["bench"]:
-        assert set(row.keys()) == {"element", "pos", "fixture", "difficulty", "order"}
-    assert set(result["captain"].keys()) == {"pick", "xp", "alternatives", "vice", "rationale", "margin"}
+        assert set(row.keys()) == {"element", "name", "pos", "fixture", "difficulty", "order"}
+    for change in result["lineup"]["changes_from_current"]:
+        assert set(change.keys()) == {"in", "in_name", "out", "out_name", "reason"}
+    assert set(result["captain"].keys()) == {
+        "pick", "pick_name", "xp", "alternatives", "vice", "vice_name", "rationale", "margin",
+    }
     assert result["captain"]["margin"] in {"clear", "close", "coin-flip"}
     for alt in result["captain"]["alternatives"]:
-        assert set(alt.keys()) == {"element", "xp", "fixture", "difficulty"}
+        assert set(alt.keys()) == {"element", "name", "xp", "fixture", "difficulty"}
     assert set(result["chip"].keys()) == {"play", "plan"}
     assert isinstance(result["warnings"], list)
 
