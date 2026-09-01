@@ -7,9 +7,12 @@ assistant for gym, nutrition, calendar, and news. Single LLM orchestrator
 domain logic lives in deterministic `tools/*.py` modules, not in prompts.
 SQLite storage (`assistant.db`), schema/CRUD in `storage/models.py`.
 
-See `Gym-CONTEXT.md`, `Mealplan-CONTEXT.md` for domain knowledge (goals,
-macro targets, training split) and `TOOL_CALLING_DESIGN.md` for the
-tool-calling architecture. Robin's persona/tone and in-chat domain knowledge
+See `docs/context/Gym-CONTEXT.md`, `docs/context/Mealplan-CONTEXT.md` for
+domain knowledge (goals, macro targets, training split) and
+`docs/context/TOOL_CALLING_DESIGN.md` for the tool-calling architecture
+(still cited as a bare filename by section number throughout `tools/*.py`
+docstrings — that convention is unchanged, only its own location moved).
+Robin's persona/tone and in-chat domain knowledge
 (portion-size defaults, calendar confirmation wording, etc.) live in
 `main.py`'s system prompt (`_ROBIN_SYSTEM`) — that's the source of truth,
 not a second copy in a docs file.

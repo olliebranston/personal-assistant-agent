@@ -24,7 +24,7 @@ Run `/init` in Claude Code to generate a starter, then shape it to match Robin s
 **Robin's actual structure today** (this section used to be a generic
 template that drifted into describing an architecture Robin no longer has —
 `/handlers/` and per-domain `/agents/` LLM routing were removed in favour of
-the tool-calling design; see `TOOL_CALLING_DESIGN.md`):
+the tool-calling design; see `docs/context/TOOL_CALLING_DESIGN.md`):
 
 ```markdown
 # Robin — Personal Assistant Bot
@@ -487,12 +487,13 @@ sudo systemctl status robin
 | File | Purpose |
 |---|---|
 | `CLAUDE.md` | Global project context for Claude |
-| `TOOL_CALLING_DESIGN.md` | Tool-calling architecture — cited by section number throughout `tools/*.py` docstrings |
-| `Gym-CONTEXT.md` | Gym domain knowledge |
-| `Mealplan-CONTEXT.md` | Meal domain knowledge |
-| `FPL-CONTEXT.md` | FPL strategy doctrine |
-| `FPL-STATUS.md` | FPL current-season status/handover — read first for any FPL work |
+| `docs/context/TOOL_CALLING_DESIGN.md` | Tool-calling architecture — cited by section number (bare filename, not path) throughout `tools/*.py` docstrings |
+| `docs/context/Gym-CONTEXT.md` | Gym domain knowledge |
+| `docs/context/Mealplan-CONTEXT.md` | Meal domain knowledge |
+| `docs/context/FPL-CONTEXT.md` | FPL strategy doctrine |
+| `docs/context/FPL-STATUS.md` | FPL current-season status/handover — read first for any FPL work |
 | `USER_GUIDE.md` | End-user-facing feature reference |
+| `docs/history/` | Completed phase briefs (PHASE1/2/3-BRIEF.md, PHASE3-ADDENDUM.md, AugustFeatures.md) — historical record, not open specs |
 
 (`CONTEXT.md`, an older duplicate high-level overview, was folded into
 `CLAUDE.md` and removed — don't recreate it as a second "project overview" doc.)

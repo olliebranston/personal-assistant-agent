@@ -2,10 +2,11 @@
 
 **Last updated:** 1 Sept 2026, after GW2. Read this first in any new session.
 
-Companion docs: `FPL-CONTEXT.md` (strategy doctrine, config, league),
-`PHASE1-BRIEF.md`, `PHASE2-BRIEF.md`, `PHASE3-BRIEF.md`. (`GW3-ACTIONS.md`,
-referenced by an earlier version of this doc, was never created — the
-diagnostic commands it would have held are in `PHASE3-BRIEF.md`'s Step 0.)
+Companion docs: `FPL-CONTEXT.md` (strategy doctrine, config, league), and
+`docs/history/PHASE1-BRIEF.md`/`PHASE2-BRIEF.md`/`PHASE3-BRIEF.md`.
+(`GW3-ACTIONS.md`, referenced by an earlier version of this doc, was never
+created — the diagnostic commands it would have held are in
+`PHASE3-BRIEF.md`'s Step 0.)
 
 ---
 
