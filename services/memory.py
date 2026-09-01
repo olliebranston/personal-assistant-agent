@@ -18,7 +18,3 @@ def add(user_id: int, role: str, content: str) -> None:
     if user_id not in _store:
         _store[user_id] = deque(maxlen=_MAX_MESSAGES)
     _store[user_id].append({"role": role, "content": content})
-
-
-def clear(user_id: int) -> None:
-    _store.pop(user_id, None)
