@@ -138,6 +138,23 @@ async def test_log_exercises_empty_list_errors():
     assert "error" in result
 
 
+@pytest.mark.asyncio
+async def test_log_exercises_malformed_item_writes_nothing():
+    # Found by adversarial review: insert_set commits per row, so a naive
+    # loop that fails partway through a list would leave earlier items
+    # durably logged while the call as a whole reports an error — breaking
+    # the "single atomic call" guarantee log_exercises is meant to provide.
+    conn = _make_conn()
+
+    result = await log_exercises(conn, exercises=[
+        {"exercise_name": "bench press", "sets": 5, "reps": 5, "weight_kg": 80.0},
+        {"exercise_name": "overhead press", "weight_kg": 52.5},  # missing "sets"/"reps"
+    ])
+
+    assert "error" in result
+    assert get_recent_sessions(conn) == []
+
+
 # ── get_last_session ─────────────────────────────────────────────────────────
 
 
@@ -327,6 +344,22 @@ async def test_get_exercise_progression_matches_across_db_abbreviation():
 
     assert result["found"] is True
     assert result["basis"]["weight_kg"] == 32.5
+
+
+@pytest.mark.asyncio
+async def test_get_exercise_progression_fuzzy_match_does_not_conflate_similar_exercises():
+    # Found by adversarial review: "incline dumbbell bench" and "incline DB
+    # curls" (normalized: "incline dumbbell curls") share enough characters
+    # to score 0.818 on a plain difflib ratio — comfortably matched by an 0.8
+    # cutoff despite being different exercises (a bench press vs a curl).
+    # The cutoff must be high enough to reject this specific near-miss.
+    conn = _make_conn()
+    s1 = insert_session(conn, GymSession(date="2026-06-15", session_type="pull"))
+    insert_set(conn, ExerciseSet(session_id=s1, exercise="incline DB curls", sets=4, reps=10, weight_kg=14.0))
+
+    result = await get_exercise_progression(conn, exercise_name="incline dumbbell bench")
+
+    assert result["found"] is False
 
 
 @pytest.mark.asyncio

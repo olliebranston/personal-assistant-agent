@@ -356,6 +356,24 @@ async def test_delete_food_log_unknown_id_returns_error():
 
 
 @pytest.mark.asyncio
+async def test_delete_food_log_by_name_does_not_match_mid_word_substring():
+    # Found by adversarial review: a plain substring test lets a short needle
+    # like "oat" match unrelated entries such as "goat cheese" mid-word.
+    # Deletion is irreversible, so it must not silently remove the wrong
+    # entry just because the needle happens to appear inside another word.
+    conn = _make_conn()
+    today = date.today().isoformat()
+
+    await log_food(conn, food_name="goat cheese", grams=30)
+
+    result = await delete_food_log(conn, food_name="oat")
+
+    assert "error" in result
+    logs = get_food_logs_for_date(conn, today)
+    assert len(logs) == 1  # goat cheese entry untouched
+
+
+@pytest.mark.asyncio
 async def test_reset_daily_food_log_clears_all_and_returns_zeroed_totals():
     conn = _make_conn()
     today = date.today().isoformat()

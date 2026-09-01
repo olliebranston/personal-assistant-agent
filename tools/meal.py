@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import sqlite3
 from datetime import date as _date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -145,6 +146,16 @@ def _name_from_description(description: str) -> str:
     parses the name back out of the '{grams}g {name}' display string."""
     parts = description.split(" ", 1)
     return parts[1] if len(parts) > 1 else description
+
+
+def _matches_at_word_start(needle: str, description: str) -> bool:
+    """True if needle occurs in description starting at a word boundary —
+    unlike a plain substring test, this rejects e.g. needle='oat' matching
+    inside 'goat cheese' while still matching 'oats'/'oatmeal' or a
+    multi-word phrase like 'greek yoghurt'. Used for delete_food_log, where
+    an unintended match is irreversible (correct_food_log's plain substring
+    match is lower-stakes — it only edits a value, never removes data)."""
+    return re.search(r"\b" + re.escape(needle.lower()), description.lower()) is not None
 
 
 def _grams_from_description(description: str) -> float:
@@ -360,8 +371,7 @@ async def delete_food_log(
             if target is None:
                 return {"error": f"no entry with id {log_id} logged today"}
         elif food_name:
-            needle = food_name.lower()
-            matches = [l for l in logs if needle in l["description"].lower()]
+            matches = [l for l in logs if _matches_at_word_start(food_name, l["description"])]
             if not matches:
                 return {"error": f"no matching entry found for '{food_name}'"}
             if len(matches) > 1:

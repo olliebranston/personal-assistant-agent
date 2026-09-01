@@ -62,7 +62,13 @@ _TOKEN_ALIASES: dict[str, str] = {
     "bw": "bodyweight",
 }
 
-_FUZZY_MATCH_CUTOFF = 0.8
+# 0.8 was found to false-positive-match distinct exercises that happen to
+# share most of their words (e.g. "incline dumbbell bench" vs "incline DB
+# curls" scores 0.818) — 0.9 comfortably excludes that (max similarity across
+# all real _SESSION_PLANS exercise pairs is 0.70) while still catching plain
+# typos/pluralisation (e.g. "romanian deadlift" vs "romanian deadlifts" scores
+# 0.971).
+_FUZZY_MATCH_CUTOFF = 0.9
 
 
 def normalize_exercise_name(name: str) -> str:
@@ -202,6 +208,15 @@ async def log_exercises(
     try:
         if not exercises:
             return {"error": "exercises list is empty"}
+
+        # Validate every item before writing any of them — insert_set commits
+        # per row, so without this an item failing partway through the list
+        # would leave earlier items durably logged while the call as a whole
+        # reports an error, breaking the "single atomic call" guarantee.
+        for i, item in enumerate(exercises):
+            missing = [k for k in ("exercise_name", "sets", "reps") if k not in item]
+            if missing:
+                return {"error": f"exercises[{i}] is missing required field(s): {', '.join(missing)}"}
 
         today = datetime.now(tz=_TZ).date().isoformat()
 
