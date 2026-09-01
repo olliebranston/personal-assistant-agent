@@ -18,7 +18,7 @@ import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
-from tools import briefing, calendar, gym, meal, news, reminders
+from tools import briefing, calendar, fpl, gym, meal, news, reminders
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,7 @@ def build_tool_registry(
         *news.TOOL_SCHEMAS,
         *briefing.TOOL_SCHEMAS,
         *reminders.TOOL_SCHEMAS,
+        *fpl.TOOL_SCHEMAS,
     ]
 
     dispatch: dict[str, ToolFunc] = {
@@ -68,6 +69,7 @@ def build_tool_registry(
         "get_session_plan": functools.partial(gym.get_session_plan, conn),
         "get_weekly_gym_summary": functools.partial(gym.get_weekly_gym_summary, conn),
         "log_food": functools.partial(meal.log_food, conn),
+        "repeat_meal": functools.partial(meal.repeat_meal, conn),
         "correct_food_log": functools.partial(meal.correct_food_log, conn),
         "set_user_food_macros": functools.partial(meal.set_user_food_macros, conn),
         "get_food_log": functools.partial(meal.get_food_log, conn),
@@ -85,6 +87,13 @@ def build_tool_registry(
         "create_reminder": functools.partial(
             reminders.create_reminder, conn, telegram_context, chat_id
         ),
+        "get_fpl_squad": functools.partial(fpl.get_fpl_squad, conn),
+        "get_fpl_team": functools.partial(fpl.get_fpl_team, conn),
+        "get_fpl_league": functools.partial(fpl.get_fpl_league, conn),
+        "get_fpl_chips": functools.partial(fpl.get_fpl_chips, conn),
+        "get_fpl_calendar": functools.partial(fpl.get_fpl_calendar, conn),
+        "get_fpl_recommendation": functools.partial(fpl.get_fpl_recommendation, conn),
+        "fpl_acknowledge": functools.partial(fpl.fpl_acknowledge, conn),
     }
 
     return ToolRegistry(schemas=schemas, dispatch=dispatch)

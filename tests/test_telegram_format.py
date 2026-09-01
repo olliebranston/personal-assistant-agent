@@ -46,6 +46,28 @@ def test_bullets_and_numbered_lists_pass_through():
     assert to_telegram_html(text) == text
 
 
+def test_fenced_code_block_becomes_pre():
+    text = "```\nGKP  Raya   £5.5m\nDEF  Saliba £6.0m\n```"
+    assert to_telegram_html(text) == "<pre>GKP  Raya   £5.5m\nDEF  Saliba £6.0m</pre>"
+
+
+def test_fenced_code_block_content_is_not_touched_by_markdown_conversion():
+    # Asterisks/underscores inside a fenced block (e.g. table alignment)
+    # must not be turned into <b>/<i> tags.
+    text = "```\n*not bold* _not italic_\n```"
+    assert to_telegram_html(text) == "<pre>*not bold* _not italic_</pre>"
+
+
+def test_fenced_code_block_escapes_html_special_chars():
+    text = "```\na < b & c\n```"
+    assert to_telegram_html(text) == "<pre>a &lt; b &amp; c</pre>"
+
+
+def test_fenced_code_block_with_language_hint_strips_hint():
+    text = "```text\nsome table\n```"
+    assert to_telegram_html(text) == "<pre>some table</pre>"
+
+
 def test_mixed_message_end_to_end():
     text = "### Logged\n- **bench press**: 80kg\n- _rest day_ tomorrow"
     expected = "<b>Logged</b>\n- <b>bench press</b>: 80kg\n- <i>rest day</i> tomorrow"

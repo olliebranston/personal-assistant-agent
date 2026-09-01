@@ -189,6 +189,51 @@ async def test_progression_no_weighted_history_returns_not_found():
     assert result == {"exercise": "pull-ups", "found": False}
 
 
+@pytest.mark.asyncio
+async def test_progression_finds_history_logged_under_a_known_alias():
+    # Reproduces a real bug: a set logged as "OHP" (the shorthand main.py's
+    # own system prompt tells the model to use) was invisible to progression
+    # lookups for "overhead press" (the canonical name used in
+    # _SESSION_PLANS) because get_last_sets_for_exercise did an exact-string
+    # match with no alias awareness — get_session_plan showed weight_kg=null
+    # for OHP even with real logged history under the "OHP" name.
+    conn = _make_conn()
+    s1 = insert_session(conn, GymSession(date="2026-06-15", session_type="push"))
+    insert_set(conn, ExerciseSet(session_id=s1, exercise="OHP", sets=4, reps=8, weight_kg=52.5))
+
+    result = await get_exercise_progression(conn, exercise_name="overhead press")
+
+    assert result["found"] is True
+    assert result["basis"]["weight_kg"] == 52.5
+
+    plan = await get_session_plan(conn, session_type="push")
+    ohp = next(ex for ex in plan["exercises"] if ex["exercise"] == "overhead press")
+    assert ohp["basis"] == "progression"
+    assert ohp["weight_kg"] == 52.5
+
+    # And the reverse direction: querying by the shorthand also finds sets
+    # logged under the canonical full name.
+    conn2 = _make_conn()
+    s2 = insert_session(conn2, GymSession(date="2026-06-15", session_type="push"))
+    insert_set(conn2, ExerciseSet(session_id=s2, exercise="overhead press", sets=4, reps=8, weight_kg=60.0))
+
+    reverse = await get_exercise_progression(conn2, exercise_name="OHP")
+    assert reverse["found"] is True
+    assert reverse["basis"]["weight_kg"] == 60.0
+
+
+@pytest.mark.asyncio
+async def test_exercise_history_finds_sets_logged_under_a_known_alias():
+    conn = _make_conn()
+    s1 = insert_session(conn, GymSession(date="2026-06-15", session_type="push"))
+    insert_set(conn, ExerciseSet(session_id=s1, exercise="OHP", sets=4, reps=8, weight_kg=52.5))
+
+    result = await get_exercise_history(conn, exercise_name="overhead press")
+
+    assert len(result["entries"]) == 1
+    assert result["entries"][0]["weight_kg"] == 52.5
+
+
 # ── get_next_session_type ────────────────────────────────────────────────────
 
 
@@ -256,6 +301,43 @@ async def test_get_session_plan_merges_weights_for_exercises_with_history():
     assert ohp["weight_kg"] is None
     assert ohp["sets"] == 4
     assert ohp["reps"] == "8"
+
+
+@pytest.mark.asyncio
+async def test_get_session_plan_orders_compound_bodyweight_movement_first():
+    # Explicit rule (Gym-CONTEXT.md "Exercise Ordering Rule"): each session
+    # opens with its signature compound/bodyweight movement, never left to
+    # the LLM to reorder per session.
+    conn = _make_conn()
+
+    push = await get_session_plan(conn, session_type="push")
+    assert push["exercises"][0]["exercise"] == "dips"
+
+    pull = await get_session_plan(conn, session_type="pull")
+    assert pull["exercises"][0]["exercise"] == "pull-ups"
+
+    legs = await get_session_plan(conn, session_type="legs")
+    assert legs["exercises"][0]["exercise"] == "Bulgarian split squats"
+
+
+@pytest.mark.asyncio
+async def test_get_session_plan_orders_compounds_before_isolation():
+    conn = _make_conn()
+
+    push = await get_session_plan(conn, session_type="push")
+    push_order = [ex["exercise"] for ex in push["exercises"]]
+    # Compounds (dips, bench press, overhead press) all precede isolation
+    # (pec fly, DB lateral raises, rope pulldowns).
+    assert push_order.index("overhead press") < push_order.index("pec fly")
+    assert push_order.index("overhead press") < push_order.index("DB lateral raises")
+    assert push_order.index("overhead press") < push_order.index("rope pulldowns")
+
+    legs = await get_session_plan(conn, session_type="legs")
+    legs_order = [ex["exercise"] for ex in legs["exercises"]]
+    # leg press is a compound, multi-joint movement — must precede the
+    # true single-joint isolation finishers (hamstring curls, quad extensions).
+    assert legs_order.index("leg press") < legs_order.index("hamstring curls")
+    assert legs_order.index("leg press") < legs_order.index("quad extensions")
 
 
 @pytest.mark.asyncio

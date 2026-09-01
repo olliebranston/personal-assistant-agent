@@ -31,6 +31,23 @@ Running Push / Pull / Legs across 3 sessions. Each session 45–60 mins.
 
 On a 5-day week, the two short sessions are unstructured — options listed below.
 
+### Exercise Ordering Rule
+
+Every session follows this order (enforced structurally by the ordered list
+in `tools/gym.py:_SESSION_PLANS`, not left to the LLM to infer per session):
+
+1. **Start with the session's signature compound/bodyweight movement** —
+   push starts with dips, pull starts with pull-ups, legs starts with
+   squats/Bulgarian split squats.
+2. **Then the rest of the compound, multi-muscle movements**, most
+   challenging/most-muscle-groups first (e.g. bench press, bent over bar
+   rows, Romanian deadlifts, leg press) — before any isolation work.
+3. **Isolation exercises last.** Within the isolation tail, group by
+   equipment where more than one isolation exercise shares it (e.g. two
+   dumbbell exercises back to back); when equipment doesn't group cleanly,
+   order by muscle group, generally mirroring the muscle sequence the
+   compounds already worked (e.g. push: chest → shoulders → triceps).
+
 ### Push — Chest, Shoulders, Triceps
 
 **Compounds first:**

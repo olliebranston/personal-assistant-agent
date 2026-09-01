@@ -4,12 +4,21 @@ import sqlite3
 from pathlib import Path
 
 from storage.models import (
+    ACKNOWLEDGEMENTS_DDL,
     EXERCISE_SET_DDL,
     FOOD_LOG_DDL,
+    GAMEWEEK_DDL,
+    GAMEWEEK_SHAPE_DDL,
     GYM_SESSION_DDL,
     MEAL_PLAN_DDL,
+    MY_HISTORY_DDL,
+    MY_PICKS_DDL,
+    NOTIFICATIONS_SENT_DDL,
+    PLAYER_SNAPSHOT_DDL,
+    PREFERENCE_DDL,
     USER_FOOD_DDL,
     WEIGHT_LOG_DDL,
+    XP_PREDICTION_DDL,
     migrate_food_logs,
 )
 
@@ -38,6 +47,15 @@ def init_db() -> None:
     conn.execute(WEIGHT_LOG_DDL)
     conn.execute(MEAL_PLAN_DDL)
     conn.execute(USER_FOOD_DDL)
+    conn.execute(GAMEWEEK_DDL)
+    conn.execute(MY_PICKS_DDL)
+    conn.execute(MY_HISTORY_DDL)
+    conn.execute(PLAYER_SNAPSHOT_DDL)
+    conn.execute(NOTIFICATIONS_SENT_DDL)
+    conn.execute(ACKNOWLEDGEMENTS_DDL)
+    conn.execute(XP_PREDICTION_DDL)
+    conn.execute(PREFERENCE_DDL)
+    conn.execute(GAMEWEEK_SHAPE_DDL)
     conn.commit()
     migrate_food_logs(conn)
     conn.close()

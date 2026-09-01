@@ -42,33 +42,68 @@ def _cycle_rank(sets: int, reps: int) -> int:
             best = i
     return best
 
+
+# Known shorthand -> the canonical name used in _SESSION_PLANS. Without this,
+# a set logged as "OHP" is invisible to progression/session-plan lookups for
+# "overhead press" (get_last_sets_for_exercise does an exact, case-insensitive
+# match with no alias awareness) — confirmed against real logged data where
+# an "OHP" entry never showed up as history for the "overhead press" slot in
+# get_session_plan. Extend this as more shorthand turns out to need it.
+_EXERCISE_ALIASES: dict[str, str] = {
+    "ohp": "overhead press",
+}
+
+
+def _exercise_name_candidates(name: str) -> list[str]:
+    """All names that should be treated as the same exercise for history
+    lookups: the given name, its canonical form, and any other alias that
+    maps to the same canonical form — so a lookup for either the shorthand
+    or the full name finds sets logged under either."""
+    canonical = _EXERCISE_ALIASES.get(name.strip().lower(), name)
+    candidates = {name, canonical}
+    candidates.update(alias for alias, canon in _EXERCISE_ALIASES.items() if canon == canonical)
+    return list(candidates)
+
+
+def _get_history_across_aliases(conn: sqlite3.Connection, exercise_name: str, limit: int) -> list[dict]:
+    """get_last_sets_for_exercise, but merged across all known aliases of exercise_name."""
+    seen_ids: set[int] = set()
+    merged: list[dict] = []
+    for candidate in _exercise_name_candidates(exercise_name):
+        for row in get_last_sets_for_exercise(conn, candidate, limit=limit):
+            if row["id"] not in seen_ids:
+                seen_ids.add(row["id"])
+                merged.append(row)
+    merged.sort(key=lambda r: (r["date"], r["id"]), reverse=True)
+    return merged[:limit]
+
 # Structured session plans — target_sets/target_reps/notes per exercise.
 # Ported from agents/gym.py:_SESSION_PLANS (free text) into the structured
 # shape required by get_session_plan's return type (§2.1).
 _SESSION_PLANS: dict[str, list[dict]] = {
     "push": [
+        {"exercise": "dips", "target_sets": 4, "target_reps": "10", "notes": None},
         {"exercise": "bench press", "target_sets": 5, "target_reps": "8", "notes": None},
         {"exercise": "overhead press", "target_sets": 4, "target_reps": "8", "notes": None},
-        {"exercise": "rope pulldowns", "target_sets": 4, "target_reps": "10", "notes": None},
-        {"exercise": "DB lateral raises", "target_sets": 4, "target_reps": "15", "notes": None},
         {"exercise": "pec fly", "target_sets": 4, "target_reps": "8", "notes": "pick 1 isolation — alternatives: cable fly 3x10, incline DB bench 4x8"},
-        {"exercise": "dips", "target_sets": 4, "target_reps": "10", "notes": "if time — alternatives: skullcrushers 4x8, ab finisher"},
+        {"exercise": "DB lateral raises", "target_sets": 4, "target_reps": "15", "notes": None},
+        {"exercise": "rope pulldowns", "target_sets": 4, "target_reps": "10", "notes": None},
     ],
     "pull": [
         {"exercise": "pull-ups", "target_sets": 4, "target_reps": "5-8", "notes": None},
         {"exercise": "bent over bar rows", "target_sets": 5, "target_reps": "10", "notes": None},
+        {"exercise": "machine rows", "target_sets": 4, "target_reps": "8", "notes": "pick 1 row — alternatives: cable rows 4x8, T-bar rows 3x10"},
         {"exercise": "face pulls", "target_sets": 4, "target_reps": "10", "notes": None},
         {"exercise": "bar curls", "target_sets": 4, "target_reps": "10", "notes": None},
-        {"exercise": "machine rows", "target_sets": 4, "target_reps": "8", "notes": "pick 1 row — alternatives: cable rows 4x8, T-bar rows 3x10"},
         {"exercise": "incline DB curls", "target_sets": 4, "target_reps": "10", "notes": "if time — alternative: cable delt fly 4x8"},
     ],
     "legs": [
         {"exercise": "Bulgarian split squats", "target_sets": 4, "target_reps": "10", "notes": "do these first — brutal"},
         {"exercise": "Smith squats", "target_sets": 5, "target_reps": "8", "notes": None},
         {"exercise": "Romanian deadlifts", "target_sets": 4, "target_reps": "10", "notes": None},
+        {"exercise": "leg press", "target_sets": 4, "target_reps": "8", "notes": "alternative: goblet squats 4x10"},
         {"exercise": "hamstring curls", "target_sets": 3, "target_reps": "8", "notes": None},
         {"exercise": "quad extensions", "target_sets": 4, "target_reps": "10", "notes": "pick 1 isolation — alternatives: calf raises 4x15, hip extensions 4x10"},
-        {"exercise": "leg press", "target_sets": 4, "target_reps": "8", "notes": "if time — alternative: goblet squats 4x10"},
     ],
     "short": [
         {"exercise": "missed muscle", "target_sets": 0, "target_reps": "5-6 exercises", "notes": "one area, minimal rest"},
@@ -176,7 +211,7 @@ async def get_last_session(conn: sqlite3.Connection, session_type: str) -> dict:
 async def get_exercise_history(conn: sqlite3.Connection, exercise_name: str, limit: int = 5) -> dict:
     """Return the most recent logged sets for one exercise, newest first."""
     try:
-        rows = get_last_sets_for_exercise(conn, exercise_name, limit=limit)
+        rows = _get_history_across_aliases(conn, exercise_name, limit=limit)
         return {
             "exercise": exercise_name,
             "entries": [
@@ -207,7 +242,7 @@ async def get_exercise_progression(conn: sqlite3.Connection, exercise_name: str)
     basis, restarting the cycle at that weight.
     """
     try:
-        rows = get_last_sets_for_exercise(conn, exercise_name, limit=100)
+        rows = _get_history_across_aliases(conn, exercise_name, limit=100)
         weighted = [r for r in rows if r.get("weight_kg") is not None]
         if not weighted:
             return {"exercise": exercise_name, "found": False}
@@ -474,9 +509,12 @@ TOOL_SCHEMAS: list[dict] = [
                 "logged history (same as get_exercise_progression would return) — present them "
                 "directly, don't call get_exercise_progression again for exercises already in "
                 "this result. weight_kg is null where there's no weighted history yet (new "
-                "exercise) — use the static target in that case. Use this single call to tell "
-                "the user what's on today, typically after determining the type via "
-                "get_next_session_type or from what the user asked for."
+                "exercise) — use the static target in that case. Exercises are returned in "
+                "the order they should be performed (compound/multi-muscle movements first, "
+                "isolation last) — present them in that order, don't re-sort or group by "
+                "muscle yourself. Use this single call to tell the user what's on today, "
+                "typically after determining the type via get_next_session_type or from what "
+                "the user asked for."
             ),
             "parameters": {
                 "type": "object",

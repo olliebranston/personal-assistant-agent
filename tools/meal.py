@@ -305,6 +305,61 @@ async def correct_food_log(
         return {"error": str(exc)}
 
 
+async def repeat_meal(
+    conn: sqlite3.Connection,
+    meal_slot: str,
+    source_date: str | None = None,
+) -> dict:
+    """Re-log a previous day's meal for a specific slot (e.g. 'same lunch as
+    yesterday'). Matches strictly on meal_slot — never on recency or list
+    position — so an unplanned snack logged after lunch can't get picked up
+    as 'lunch' by mistake. Re-runs the nutrition lookup per item so any
+    calibration since source_date is picked up."""
+    try:
+        src_date = source_date or (_today() - timedelta(days=1)).isoformat()
+        source_logs = get_food_logs_for_date(conn, src_date)
+        items = [l for l in source_logs if l["meal_slot"] == meal_slot]
+        if not items:
+            return {"error": f"no {meal_slot} logged on {src_date}"}
+
+        today = _today().isoformat()
+        logged_items = []
+        for item in items:
+            food_name = item["food_name"] or _name_from_description(item["description"])
+            grams = item["grams"] if item["grams"] is not None else _grams_from_description(item["description"])
+            macros = await _lookup_with_user_override(conn, food_name, grams)
+            description = f"{grams:.0f}g {food_name}"
+            log_id = insert_food_log(conn, FoodLog(
+                date=today,
+                meal_slot=meal_slot,
+                description=description,
+                protein_g=macros["protein_g"],
+                kcal=macros["kcal"],
+                grams=grams,
+                food_name=food_name,
+                source=macros["source"],
+            ))
+            logged_items.append({
+                "id": log_id,
+                "food_name": food_name,
+                "grams": grams,
+                "protein_g": macros["protein_g"],
+                "kcal": macros["kcal"],
+                "source": macros["source"],
+            })
+
+        return {
+            "logged": True,
+            "meal_slot": meal_slot,
+            "source_date": src_date,
+            "items": logged_items,
+            "daily_totals": _daily_macros_dict(conn, today),
+        }
+    except Exception as exc:
+        logger.warning("repeat_meal failed: %s", exc)
+        return {"error": str(exc)}
+
+
 # ── Macro queries ─────────────────────────────────────────────────────────────
 
 
@@ -585,7 +640,13 @@ TOOL_SCHEMAS: list[dict] = [
                     "meal_slot": {
                         "type": ["string", "null"],
                         "enum": ["breakfast", "snack", "lunch", "shake", "dinner", "alcohol", "other", None],
-                        "description": "Which meal this belongs to. Infer from context if not stated.",
+                        "description": (
+                            "Which meal this belongs to. Only set this from what Ollie actually "
+                            "said or an unambiguous context clue (e.g. a direct reply to a "
+                            "breakfast/lunch/dinner prompt) — never guess from time-of-day or "
+                            "what was logged last. If it's genuinely unclear which meal this is, "
+                            "ask rather than guess."
+                        ),
                     },
                 },
                 "required": ["food_name", "grams"],
@@ -665,8 +726,10 @@ TOOL_SCHEMAS: list[dict] = [
             "name": "get_food_log",
             "description": (
                 "Get every food entry logged for a given date, plus that day's totals. Use "
-                "this to answer 'what did I eat yesterday', to find an entry's id for a "
-                "correction, or to repeat a previous day's meal."
+                "this to answer 'what did I eat yesterday' or to find an entry's id for a "
+                "correction. To repeat a previous day's meal (e.g. 'same lunch as "
+                "yesterday'), use repeat_meal instead — don't reconstruct it by hand from "
+                "this."
             ),
             "parameters": {
                 "type": "object",
@@ -677,6 +740,36 @@ TOOL_SCHEMAS: list[dict] = [
                     },
                 },
                 "required": ["date"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "repeat_meal",
+            "description": (
+                "Re-log a previous day's meal for a specific slot — use this for 'same "
+                "breakfast/lunch as yesterday', 'repeat yesterday's lunch', or replies to "
+                "the 'Same as yesterday?' prompts. Matches strictly on meal_slot (never on "
+                "recency or list position), so an unplanned snack logged after lunch can't "
+                "get picked up as 'lunch' by mistake. Re-runs the nutrition lookup per item, "
+                "so it reflects any calibration since then. Returns the same itemised "
+                "breakdown as log_food."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "meal_slot": {
+                        "type": "string",
+                        "enum": ["breakfast", "snack", "lunch", "shake", "dinner", "alcohol", "other"],
+                        "description": "Exact slot to repeat, e.g. 'lunch' for 'same lunch'.",
+                    },
+                    "source_date": {
+                        "type": ["string", "null"],
+                        "description": "Date to copy from, YYYY-MM-DD. Omit or null for yesterday.",
+                    },
+                },
+                "required": ["meal_slot"],
             },
         },
     },

@@ -19,6 +19,8 @@ from telegram.error import BadRequest
 logger = logging.getLogger(__name__)
 
 _HEADER_RE = re.compile(r"^#{1,6}[ \t]+(.+)$", re.MULTILINE)
+_FENCE_RE = re.compile(r"```(?:[ \t]*\w*\n)?(.*?)```", re.DOTALL)
+_FENCE_PLACEHOLDER_RE = re.compile(r"\x00(\d+)\x00")
 _CODE_RE = re.compile(r"`([^`\n]+)`")
 _BOLD_RE = re.compile(r"\*\*([^*\n]+)\*\*")
 _ITALIC_STAR_RE = re.compile(r"\*([^*\n]+)\*")
@@ -28,16 +30,35 @@ _ITALIC_UNDERSCORE_RE = re.compile(r"(?<![\w_])_([^_\n]+)_(?![\w_])")
 def to_telegram_html(text: str) -> str:
     """Convert common markdown patterns to Telegram-supported HTML tags.
 
-    Handles: **bold**, *bold*, _italic_, `code`, and #/##/### headers (bold
-    line, hashes stripped). Bullets (-/•) and numbered lists pass through
-    unchanged — Telegram doesn't need markup for those.
+    Handles: **bold**, *bold*, _italic_, `code`, ```fenced blocks``` (fixed-
+    width tables — FPL squad/league listings use these), and #/##/### headers
+    (bold line, hashes stripped). Bullets (-/•) and numbered lists pass
+    through unchanged — Telegram doesn't need markup for those.
     """
-    escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # Fenced blocks are pulled out before any other conversion runs, so their
+    # content (which may itself contain *, _, # characters used for table
+    # alignment) isn't mangled by the bold/italic/header regexes below, then
+    # escaped and restored as <pre> at the end.
+    blocks: list[str] = []
+
+    def _stash(match: re.Match) -> str:
+        blocks.append(match.group(1).strip("\n"))
+        return f"\x00{len(blocks) - 1}\x00"
+
+    stashed = _FENCE_RE.sub(_stash, text)
+
+    escaped = stashed.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     with_headers = _HEADER_RE.sub(r"<b>\1</b>", escaped)
     with_code = _CODE_RE.sub(r"<code>\1</code>", with_headers)
     with_bold = _BOLD_RE.sub(r"<b>\1</b>", with_code)
     with_italic_star = _ITALIC_STAR_RE.sub(r"<i>\1</i>", with_bold)
-    return _ITALIC_UNDERSCORE_RE.sub(r"<i>\1</i>", with_italic_star)
+    result = _ITALIC_UNDERSCORE_RE.sub(r"<i>\1</i>", with_italic_star)
+
+    def _restore(match: re.Match) -> str:
+        block = blocks[int(match.group(1))]
+        return f"<pre>{block.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')}</pre>"
+
+    return _FENCE_PLACEHOLDER_RE.sub(_restore, result)
 
 
 async def send_formatted(bot: Bot, chat_id: int, text: str) -> None:

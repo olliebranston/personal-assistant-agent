@@ -19,3 +19,7 @@ GOOGLE_TOKEN_FILE: str = os.getenv("GOOGLE_TOKEN_FILE", "token.json")
 
 RACING_API_USERNAME: str = os.getenv("RACING_API_USERNAME", "")
 RACING_API_PASSWORD: str = os.getenv("RACING_API_PASSWORD", "")
+
+FPL_ENABLED: bool = os.getenv("FPL_ENABLED", "false").lower() == "true"
+FPL_TEAM_ID: int = int(os.getenv("FPL_TEAM_ID", "0"))
+FPL_LEAGUE_ID: int = int(os.getenv("FPL_LEAGUE_ID", "0"))

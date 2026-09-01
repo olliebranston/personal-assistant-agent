@@ -7,6 +7,9 @@ token.json
 # SQLite databases
 *.db
 
+# FPL bootstrap-static disk cache (services/fpl_client.py)
+fpl_bootstrap_cache.json
+
 # Python
 __pycache__/
 *.pyc

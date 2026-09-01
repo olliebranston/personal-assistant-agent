@@ -24,6 +24,7 @@ from tools.meal import (
     get_weight_trend,
     log_food,
     log_weight,
+    repeat_meal,
     set_user_food_macros,
 )
 
@@ -258,6 +259,81 @@ async def test_get_food_log_returns_all_entries_for_date_with_totals():
 
     assert result["totals"]["protein_g"] == 20.0 + 13.6   # 17.0g/100g * 80g = 13.6
     assert result["totals"]["kcal"] == 118.0 + 311.0      # 389.0kcal/100g * 80g = 311.2 -> 311.0
+
+
+# ── repeat_meal ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_repeat_meal_targets_correct_slot_not_an_intervening_snack():
+    """Log breakfast, then an unplanned snack, then lunch (in that order) —
+    'same lunch' the next day must reuse the lunch entry, not the snack that
+    was logged after it. Regression test: meal_slot must be matched
+    explicitly, never inferred positionally/by recency."""
+    conn = _make_conn()
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    today = date.today().isoformat()
+
+    await log_food(conn, food_name="Greek yoghurt", grams=200, meal_slot="breakfast")
+    await log_food(conn, food_name="protein bar", grams=60, meal_slot="snack")
+    await log_food(conn, food_name="oats", grams=80, meal_slot="lunch")
+
+    # Move all three of "today's" entries back to yesterday so repeat_meal
+    # (which defaults to copying from yesterday) has something to find.
+    conn.execute("UPDATE food_logs SET date = ? WHERE date = ?", (yesterday, today))
+    conn.commit()
+
+    result = await repeat_meal(conn, meal_slot="lunch")
+
+    assert result["logged"] is True
+    assert result["meal_slot"] == "lunch"
+    assert len(result["items"]) == 1
+    assert result["items"][0]["food_name"] == "oats"
+
+    todays_logs = get_food_logs_for_date(conn, today)
+    assert len(todays_logs) == 1
+    assert todays_logs[0]["meal_slot"] == "lunch"
+    assert todays_logs[0]["description"] == "80g oats"
+    assert todays_logs[0]["protein_g"] != 60  # not the protein bar's macros
+
+
+@pytest.mark.asyncio
+async def test_repeat_meal_no_matching_slot_returns_error():
+    conn = _make_conn()
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    today = date.today().isoformat()
+
+    await log_food(conn, food_name="Greek yoghurt", grams=200, meal_slot="breakfast")
+    conn.execute("UPDATE food_logs SET date = ? WHERE date = ?", (yesterday, today))
+    conn.commit()
+
+    result = await repeat_meal(conn, meal_slot="lunch")
+
+    assert "error" in result
+    assert get_food_logs_for_date(conn, today) == []
+
+
+@pytest.mark.asyncio
+async def test_repeat_meal_recalculates_macros_from_current_calibration():
+    conn = _make_conn()
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+
+    conn.execute(
+        "INSERT INTO food_logs (date, meal_slot, description, protein_g, kcal, "
+        "source, grams, food_name) VALUES (?, 'dinner', '150g mystery meat', 0.0, 0.0, "
+        "'estimated', 150, 'mystery meat')",
+        (yesterday,),
+    )
+    conn.commit()
+
+    from storage.models import upsert_user_food
+    upsert_user_food(conn, "mystery meat", 20.0, 200.0, "2026-06-01T00:00:00")
+
+    result = await repeat_meal(conn, meal_slot="dinner")
+
+    assert result["logged"] is True
+    assert result["items"][0]["protein_g"] == 30.0  # 20.0g/100g * 150g, from calibration
+    assert result["items"][0]["source"] == "user_defined"
 
 
 # ── get_daily_macros ─────────────────────────────────────────────────────────

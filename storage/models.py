@@ -416,3 +416,346 @@ def get_week_logs(conn: sqlite3.Connection, start_date: str, end_date: str) -> l
         (start_date, end_date),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# FPL DDL — Phase 1 adherence layer (PHASE1-BRIEF.md §2)
+# ---------------------------------------------------------------------------
+
+GAMEWEEK_DDL = """
+CREATE TABLE IF NOT EXISTS gameweeks (
+    gw              INTEGER PRIMARY KEY,
+    deadline_utc    TEXT NOT NULL,
+    is_current      INTEGER DEFAULT 0,
+    is_next         INTEGER DEFAULT 0,
+    finished        INTEGER DEFAULT 0,
+    data_checked    INTEGER DEFAULT 0
+)
+"""
+
+MY_PICKS_DDL = """
+CREATE TABLE IF NOT EXISTS my_picks (
+    gw              INTEGER,
+    element_id      INTEGER,
+    position        INTEGER,
+    is_captain      INTEGER,
+    is_vice         INTEGER,
+    multiplier      INTEGER,
+    PRIMARY KEY (gw, element_id)
+)
+"""
+
+MY_HISTORY_DDL = """
+CREATE TABLE IF NOT EXISTS my_history (
+    gw              INTEGER PRIMARY KEY,
+    points          INTEGER,
+    total_points    INTEGER,
+    overall_rank    INTEGER,
+    bank            INTEGER,
+    team_value      INTEGER,
+    transfers       INTEGER,
+    transfer_cost   INTEGER,
+    chip            TEXT
+)
+"""
+
+PLAYER_SNAPSHOT_DDL = """
+CREATE TABLE IF NOT EXISTS player_snapshots (
+    taken_at        TEXT,
+    element_id      INTEGER,
+    now_cost        INTEGER,
+    status          TEXT,
+    chance_next     INTEGER,
+    news            TEXT,
+    PRIMARY KEY (taken_at, element_id)
+)
+"""
+
+NOTIFICATIONS_SENT_DDL = """
+CREATE TABLE IF NOT EXISTS notifications_sent (
+    gw              INTEGER,
+    kind            TEXT,
+    sent_at         TEXT,
+    PRIMARY KEY (gw, kind)
+)
+"""
+
+ACKNOWLEDGEMENTS_DDL = """
+CREATE TABLE IF NOT EXISTS acknowledgements (
+    gw              INTEGER PRIMARY KEY,
+    acked_at        TEXT
+)
+"""
+
+
+# ---------------------------------------------------------------------------
+# FPL CRUD
+# ---------------------------------------------------------------------------
+
+
+def upsert_gameweeks(conn: sqlite3.Connection, gameweeks: list[dict]) -> None:
+    """Replace the gameweeks table with fresh rows from bootstrap-static.
+
+    Each dict: {gw, deadline_utc, is_current, is_next, finished, data_checked}.
+    """
+    conn.executemany(
+        """INSERT INTO gameweeks (gw, deadline_utc, is_current, is_next, finished, data_checked)
+           VALUES (:gw, :deadline_utc, :is_current, :is_next, :finished, :data_checked)
+           ON CONFLICT(gw) DO UPDATE SET
+               deadline_utc = excluded.deadline_utc,
+               is_current   = excluded.is_current,
+               is_next      = excluded.is_next,
+               finished     = excluded.finished,
+               data_checked = excluded.data_checked""",
+        gameweeks,
+    )
+    conn.commit()
+
+
+def get_gameweek(conn: sqlite3.Connection, gw: int) -> dict | None:
+    row = conn.execute("SELECT * FROM gameweeks WHERE gw = ?", (gw,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_all_gameweeks(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute("SELECT * FROM gameweeks ORDER BY gw").fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_next_gameweek(conn: sqlite3.Connection, now_utc_iso: str) -> dict | None:
+    """Return the gameweek with the nearest upcoming deadline, or None if the season's over."""
+    row = conn.execute(
+        "SELECT * FROM gameweeks WHERE deadline_utc > ? ORDER BY deadline_utc ASC LIMIT 1",
+        (now_utc_iso,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_current_gameweek(conn: sqlite3.Connection) -> dict | None:
+    row = conn.execute("SELECT * FROM gameweeks WHERE is_current = 1").fetchone()
+    return dict(row) if row else None
+
+
+def get_unreviewed_finished_gameweeks(conn: sqlite3.Connection) -> list[dict]:
+    """Gameweeks where data_checked is true but we haven't sent a 'review' notification yet."""
+    rows = conn.execute(
+        """SELECT g.* FROM gameweeks g
+           WHERE g.data_checked = 1
+             AND NOT EXISTS (
+                 SELECT 1 FROM notifications_sent n
+                  WHERE n.gw = g.gw AND n.kind = 'review'
+             )
+           ORDER BY g.gw"""
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def replace_my_picks(conn: sqlite3.Connection, gw: int, rows: list[dict]) -> None:
+    """Overwrite this GW's picks — read fresh from the API after each deadline (§4.5 of FPL-CONTEXT.md)."""
+    conn.execute("DELETE FROM my_picks WHERE gw = ?", (gw,))
+    conn.executemany(
+        """INSERT INTO my_picks (gw, element_id, position, is_captain, is_vice, multiplier)
+           VALUES (:gw, :element_id, :position, :is_captain, :is_vice, :multiplier)""",
+        [{**r, "gw": gw} for r in rows],
+    )
+    conn.commit()
+
+
+def get_my_picks(conn: sqlite3.Connection, gw: int) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM my_picks WHERE gw = ? ORDER BY position", (gw,)
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_latest_my_picks_gw(conn: sqlite3.Connection) -> int | None:
+    row = conn.execute("SELECT MAX(gw) AS gw FROM my_picks").fetchone()
+    return row["gw"] if row and row["gw"] is not None else None
+
+
+def upsert_my_history(conn: sqlite3.Connection, row: dict) -> None:
+    """Insert or replace one GW's row. Keys: gw, points, total_points, overall_rank,
+    bank, team_value, transfers, transfer_cost, chip."""
+    conn.execute(
+        """INSERT INTO my_history (gw, points, total_points, overall_rank, bank, team_value, transfers, transfer_cost, chip)
+           VALUES (:gw, :points, :total_points, :overall_rank, :bank, :team_value, :transfers, :transfer_cost, :chip)
+           ON CONFLICT(gw) DO UPDATE SET
+               points        = excluded.points,
+               total_points  = excluded.total_points,
+               overall_rank  = excluded.overall_rank,
+               bank          = excluded.bank,
+               team_value    = excluded.team_value,
+               transfers     = excluded.transfers,
+               transfer_cost = excluded.transfer_cost,
+               chip          = excluded.chip""",
+        row,
+    )
+    conn.commit()
+
+
+def get_my_history(conn: sqlite3.Connection, gw: int) -> dict | None:
+    row = conn.execute("SELECT * FROM my_history WHERE gw = ?", (gw,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_all_my_history(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute("SELECT * FROM my_history ORDER BY gw").fetchall()
+    return [dict(r) for r in rows]
+
+
+def insert_player_snapshots(conn: sqlite3.Connection, taken_at: str, rows: list[dict]) -> None:
+    """Bulk snapshot of owned players' status. Each dict: {element_id, now_cost, status, chance_next, news}."""
+    conn.executemany(
+        """INSERT OR REPLACE INTO player_snapshots (taken_at, element_id, now_cost, status, chance_next, news)
+           VALUES (:taken_at, :element_id, :now_cost, :status, :chance_next, :news)""",
+        [{**r, "taken_at": taken_at} for r in rows],
+    )
+    conn.commit()
+
+
+def get_latest_snapshot(conn: sqlite3.Connection, element_id: int) -> dict | None:
+    row = conn.execute(
+        "SELECT * FROM player_snapshots WHERE element_id = ? ORDER BY taken_at DESC LIMIT 1",
+        (element_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def mark_notification_sent(conn: sqlite3.Connection, gw: int, kind: str, sent_at: str) -> None:
+    """Idempotent — a cron that fires twice must not send twice (PHASE1-BRIEF.md §3)."""
+    conn.execute(
+        "INSERT OR IGNORE INTO notifications_sent (gw, kind, sent_at) VALUES (?, ?, ?)",
+        (gw, kind, sent_at),
+    )
+    conn.commit()
+
+
+def was_notification_sent(conn: sqlite3.Connection, gw: int, kind: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM notifications_sent WHERE gw = ? AND kind = ?", (gw, kind)
+    ).fetchone()
+    return row is not None
+
+
+def set_acknowledged(conn: sqlite3.Connection, gw: int, acked_at: str) -> None:
+    conn.execute(
+        "INSERT INTO acknowledgements (gw, acked_at) VALUES (?, ?) "
+        "ON CONFLICT(gw) DO UPDATE SET acked_at = excluded.acked_at",
+        (gw, acked_at),
+    )
+    conn.commit()
+
+
+def is_acknowledged(conn: sqlite3.Connection, gw: int) -> bool:
+    row = conn.execute("SELECT 1 FROM acknowledgements WHERE gw = ?", (gw,)).fetchone()
+    return row is not None
+
+
+# ---------------------------------------------------------------------------
+# FPL DDL — Phase 2 recommendation engine (PHASE2-BRIEF.md)
+# ---------------------------------------------------------------------------
+
+XP_PREDICTION_DDL = """
+CREATE TABLE IF NOT EXISTS xp_predictions (
+    gw            INTEGER,
+    element_id    INTEGER,
+    xp            REAL,
+    model_version TEXT,
+    computed_at   TEXT,
+    PRIMARY KEY (gw, element_id, model_version)
+)
+"""
+
+PREFERENCE_DDL = """
+CREATE TABLE IF NOT EXISTS preferences (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind         TEXT NOT NULL,   -- 'force_in' | 'force_out' | 'min_club'
+    value        TEXT NOT NULL,   -- element_id, or 'club_id=n' for min_club
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT             -- NULL = no expiry
+)
+"""
+
+GAMEWEEK_SHAPE_DDL = """
+CREATE TABLE IF NOT EXISTS gameweek_shapes (
+    gw            INTEGER PRIMARY KEY,
+    fixture_count INTEGER NOT NULL,
+    blanks_json   TEXT NOT NULL,
+    doubles_json  TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+)
+"""
+
+
+# ---------------------------------------------------------------------------
+# FPL CRUD — Phase 2
+# ---------------------------------------------------------------------------
+
+
+def log_xp_predictions(conn: sqlite3.Connection, gw: int, model_version: str, computed_at: str, predictions: dict[int, float]) -> None:
+    """Bulk-log one model's per-player xP predictions for a gameweek — the history
+    Phase 4 needs to answer 'are we beating just points_per_game' (PHASE2-BRIEF.md §2)."""
+    conn.executemany(
+        """INSERT OR REPLACE INTO xp_predictions (gw, element_id, xp, model_version, computed_at)
+           VALUES (:gw, :element_id, :xp, :model_version, :computed_at)""",
+        [
+            {"gw": gw, "element_id": eid, "xp": xp, "model_version": model_version, "computed_at": computed_at}
+            for eid, xp in predictions.items()
+        ],
+    )
+    conn.commit()
+
+
+def get_xp_predictions(conn: sqlite3.Connection, gw: int, model_version: str) -> dict[int, float]:
+    rows = conn.execute(
+        "SELECT element_id, xp FROM xp_predictions WHERE gw = ? AND model_version = ?",
+        (gw, model_version),
+    ).fetchall()
+    return {r["element_id"]: r["xp"] for r in rows}
+
+
+def add_preference(conn: sqlite3.Connection, kind: str, value: str, created_at: str, expires_at: str | None) -> int:
+    cur = conn.execute(
+        "INSERT INTO preferences (kind, value, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        (kind, value, created_at, expires_at),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_active_preferences(conn: sqlite3.Connection, now_iso: str) -> list[dict]:
+    """Preferences not yet expired — expires_at IS NULL means no expiry."""
+    rows = conn.execute(
+        "SELECT * FROM preferences WHERE expires_at IS NULL OR expires_at > ? ORDER BY created_at",
+        (now_iso,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def prune_expired_preferences(conn: sqlite3.Connection, now_iso: str) -> None:
+    conn.execute("DELETE FROM preferences WHERE expires_at IS NOT NULL AND expires_at <= ?", (now_iso,))
+    conn.commit()
+
+
+def upsert_gameweek_shape(conn: sqlite3.Connection, gw: int, fixture_count: int, blanks_json: str, doubles_json: str, updated_at: str) -> None:
+    conn.execute(
+        """INSERT INTO gameweek_shapes (gw, fixture_count, blanks_json, doubles_json, updated_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(gw) DO UPDATE SET
+               fixture_count = excluded.fixture_count,
+               blanks_json   = excluded.blanks_json,
+               doubles_json  = excluded.doubles_json,
+               updated_at    = excluded.updated_at""",
+        (gw, fixture_count, blanks_json, doubles_json, updated_at),
+    )
+    conn.commit()
+
+
+def get_gameweek_shape(conn: sqlite3.Connection, gw: int) -> dict | None:
+    row = conn.execute("SELECT * FROM gameweek_shapes WHERE gw = ?", (gw,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_all_gameweek_shapes(conn: sqlite3.Connection) -> dict[int, dict]:
+    rows = conn.execute("SELECT * FROM gameweek_shapes ORDER BY gw").fetchall()
+    return {r["gw"]: dict(r) for r in rows}

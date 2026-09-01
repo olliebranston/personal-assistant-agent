@@ -12,6 +12,7 @@ from telegram.ext import Application
 import config
 from agents import meal as meal_agent
 from agents.meal import _format_yesterday_slot_for_prompt
+from bot.fpl_jobs import register_fpl_jobs
 from data.recipes import RECIPES
 from services.openrouter import complete
 from storage.db import get_connection
@@ -347,3 +348,5 @@ def register_jobs(app: Application) -> None:
         "Jobs registered: morning 07:00, mid-morning 10:30 (Mon-Fri), "
         "lunch prompt 12:30 (Tue-Thu), evening 21:00, EOD 23:00, Friday 17:00, Sunday 10:00"
     )
+
+    register_fpl_jobs(app)
