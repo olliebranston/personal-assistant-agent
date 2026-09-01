@@ -113,6 +113,17 @@ def get_last_sets_for_exercise(
     return [dict(r) for r in rows]
 
 
+def get_distinct_exercise_names(conn: sqlite3.Connection) -> list[str]:
+    """Return every distinct exercise name ever logged, exactly as stored.
+
+    Used to build a name-matching vocabulary for exercise-name normalization
+    (tools/gym.py) — real logged history takes priority over the static
+    session-plan vocabulary since it's what a lookup actually needs to match.
+    """
+    rows = conn.execute("SELECT DISTINCT exercise FROM exercise_sets").fetchall()
+    return [r["exercise"] for r in rows]
+
+
 def get_recent_sessions(
     conn: sqlite3.Connection,
     limit: int = 10,
@@ -256,6 +267,20 @@ def update_food_log(
     params.append(log_id)
     conn.execute(f"UPDATE food_logs SET {', '.join(fields)} WHERE id = ?", params)
     conn.commit()
+
+
+def delete_food_log(conn: sqlite3.Connection, log_id: int) -> bool:
+    """Delete one food log entry by id. Returns True if a row was removed."""
+    cur = conn.execute("DELETE FROM food_logs WHERE id = ?", (log_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def delete_food_logs_for_date(conn: sqlite3.Connection, date: str) -> int:
+    """Delete every food log entry for a date. Returns the number of rows removed."""
+    cur = conn.execute("DELETE FROM food_logs WHERE date = ?", (date,))
+    conn.commit()
+    return cur.rowcount
 
 
 # ---------------------------------------------------------------------------
@@ -651,11 +676,6 @@ def get_my_history(conn: sqlite3.Connection, gw: int) -> dict | None:
     return dict(row) if row else None
 
 
-def get_all_my_history(conn: sqlite3.Connection) -> list[dict]:
-    rows = conn.execute("SELECT * FROM my_history ORDER BY gw").fetchall()
-    return [dict(r) for r in rows]
-
-
 # ---------------------------------------------------------------------------
 # Mini-league rivals — PHASE3-BRIEF.md Step 4 / PHASE3-ADDENDUM.md §0.
 #
@@ -785,11 +805,6 @@ def get_rival_history_for_entry(conn: sqlite3.Connection, entry_id: int) -> list
     rows = conn.execute(
         "SELECT * FROM rival_history WHERE entry_id = ? ORDER BY gw", (entry_id,)
     ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def get_rival_history_for_gw(conn: sqlite3.Connection, gw: int) -> list[dict]:
-    rows = conn.execute("SELECT * FROM rival_history WHERE gw = ?", (gw,)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -944,8 +959,3 @@ def upsert_gameweek_shape(conn: sqlite3.Connection, gw: int, fixture_count: int,
 def get_gameweek_shape(conn: sqlite3.Connection, gw: int) -> dict | None:
     row = conn.execute("SELECT * FROM gameweek_shapes WHERE gw = ?", (gw,)).fetchone()
     return dict(row) if row else None
-
-
-def get_all_gameweek_shapes(conn: sqlite3.Connection) -> dict[int, dict]:
-    rows = conn.execute("SELECT * FROM gameweek_shapes ORDER BY gw").fetchall()
-    return {r["gw"]: dict(r) for r in rows}

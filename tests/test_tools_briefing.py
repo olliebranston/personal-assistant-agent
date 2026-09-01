@@ -168,7 +168,7 @@ async def test_yesterday_nutrition_fetched_for_correct_date(monkeypatch):
         }
 
     monkeypatch.setattr(briefing_module, "get_daily_macros", _mock_get_daily_macros)
-    monkeypatch.setattr(briefing_module, "get_calendar_events", _async_return({"error": "calendar_unavailable"}))
+    monkeypatch.setattr(calendar_tools, "get_calendar_events", _async_return({"error": "calendar_unavailable"}))
     monkeypatch.setattr(briefing_module, "get_news", _async_return(
         {"chelsea": [], "world": [], "horses": {"rate_limited": False, "entries": {}}, "today_calendar": []}
     ))
@@ -186,7 +186,7 @@ async def test_yesterday_nutrition_fetched_for_correct_date(monkeypatch):
 async def test_horses_filtered_to_today_only(monkeypatch):
     conn = _make_conn()
 
-    monkeypatch.setattr(briefing_module, "get_calendar_events", _async_return({"error": "calendar_unavailable"}))
+    monkeypatch.setattr(calendar_tools, "get_calendar_events", _async_return({"error": "calendar_unavailable"}))
     monkeypatch.setattr(briefing_module, "get_news", _async_return({
         "chelsea": [],
         "world": [],
@@ -225,7 +225,7 @@ async def test_horses_filtered_to_today_only(monkeypatch):
 async def test_source_failure_returns_safe_defaults(monkeypatch):
     conn = _make_conn()
 
-    monkeypatch.setattr(briefing_module, "get_calendar_events", _async_raise(RuntimeError("calendar down")))
+    monkeypatch.setattr(calendar_tools, "get_calendar_events", _async_raise(RuntimeError("calendar down")))
     monkeypatch.setattr(briefing_module, "get_news", _async_raise(RuntimeError("news down")))
     monkeypatch.setattr(briefing_module, "get_next_session_type", _async_raise(RuntimeError("gym down")))
     monkeypatch.setattr(briefing_module, "get_last_session", _async_raise(RuntimeError("gym down")))

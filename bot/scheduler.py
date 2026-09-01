@@ -5,13 +5,12 @@ from __future__ import annotations
 import datetime
 import json
 import logging
-from zoneinfo import ZoneInfo
 
 from telegram.ext import Application
 
 import config
-from agents import meal as meal_agent
-from agents.meal import _format_yesterday_slot_for_prompt
+from services import meal_helpers
+from services.meal_helpers import _format_yesterday_slot_for_prompt
 from bot.fpl_jobs import register_fpl_jobs
 from data.recipes import RECIPES
 from services.openrouter import complete
@@ -22,7 +21,7 @@ from utils.telegram_format import send_formatted
 
 logger = logging.getLogger(__name__)
 
-_TZ = ZoneInfo("Europe/London")
+_TZ = config.TZ
 _UID = config.TELEGRAM_ALLOWED_USER_ID
 
 
@@ -227,7 +226,7 @@ async def _lunch_prompt(context) -> None:
         )
     else:
         # Nothing logged yesterday — send generic batch cook reminder
-        rotation = meal_agent.get_lunch_rotation()
+        rotation = meal_helpers.get_lunch_rotation()
         await send_formatted(
             context.bot,
             _UID,
@@ -268,7 +267,7 @@ async def _end_of_day_summary(context) -> None:
     """11:00 PM daily: full macro summary."""
     conn = get_connection()
     try:
-        summary = meal_agent.daily_summary(conn)
+        summary = meal_helpers.daily_summary(conn)
     finally:
         conn.close()
 
@@ -279,7 +278,7 @@ async def _friday_meal_plan(context) -> None:
     """5:00 PM Friday: week summary + next week's meal plan + derived shopping list."""
     conn = get_connection()
     try:
-        summary = meal_agent.build_friday_summary(conn)
+        summary = meal_helpers.build_friday_summary(conn)
     finally:
         conn.close()
 

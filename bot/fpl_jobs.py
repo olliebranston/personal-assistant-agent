@@ -12,24 +12,19 @@ from __future__ import annotations
 
 import datetime
 import logging
-from zoneinfo import ZoneInfo
 
 from telegram.ext import Application
 
 import config
-from services import fpl_client, fpl_league
+from services import fpl_client
 from services.fpl_optimiser import verify_squad_value
 from storage.db import get_connection
 from storage.models import (
     get_active_rivals,
     get_all_gameweeks,
     get_all_rivals,
-    get_latest_rival_picks_gw_before,
     get_latest_snapshot,
     get_my_history,
-    get_my_picks,
-    get_rival_history_row,
-    get_rival_picks,
     get_unreviewed_finished_gameweeks,
     has_rival_picks,
     insert_player_snapshots,
@@ -61,7 +56,7 @@ from utils.telegram_format import send_formatted
 
 logger = logging.getLogger(__name__)
 
-_TZ = ZoneInfo("Europe/London")
+_TZ = config.TZ
 _UID = config.TELEGRAM_ALLOWED_USER_ID
 _TICK_INTERVAL_SEC = 300
 _CHIP_NAMES = {"wildcard": "Wildcard", "freehit": "Free Hit", "3xc": "Triple Captain", "bboost": "Bench Boost"}

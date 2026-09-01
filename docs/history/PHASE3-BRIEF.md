@@ -1,7 +1,13 @@
 # Next build steps — Claude Code brief
 
-**Written 1 Sept 2026, after GW2.** Context: `FPL-CONTEXT.md`, `FPL-STATUS.md`,
-`GW3-ACTIONS.md`. Prior specs: `FPL-PHASE1-BRIEF.md`, `FPL-PHASE2-BRIEF.md`.
+**Status: implemented.** Steps 0-4 below all shipped the same day this was
+written (git log: `92746f4` Step 1/2, `eccc66e` Step 3, `7e0ba7e` Step 4) —
+kept as a historical build spec, see `FPL-STATUS.md` for current state.
+
+**Written 1 Sept 2026, after GW2.** Context: `FPL-CONTEXT.md`, `FPL-STATUS.md`.
+Prior specs: `PHASE1-BRIEF.md`, `PHASE2-BRIEF.md`. (An earlier version of
+this doc also referenced `GW3-ACTIONS.md` — that file was never created;
+its planned diagnostic-command content lives in Step 0 below instead.)
 
 Four steps, in strict order. Step 0 blocks everything — the code is written and
 tested but is not running, so it has delivered zero points so far.

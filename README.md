@@ -21,50 +21,57 @@ This file lives at the root of your repo. Claude reads it at the start of every 
 
 Run `/init` in Claude Code to generate a starter, then shape it to match Robin specifically. Keep it short — it's loaded every session, so bloat here costs you tokens on everything.
 
-**Recommended structure for Robin:**
+**Robin's actual structure today** (this section used to be a generic
+template that drifted into describing an architecture Robin no longer has —
+`/handlers/` and per-domain `/agents/` LLM routing were removed in favour of
+the tool-calling design; see `docs/context/TOOL_CALLING_DESIGN.md`):
 
 ```markdown
 # Robin — Personal Assistant Bot
 
 ## Project Overview
-Telegram bot with modular agents: gym, meal, calendar, news.
+Telegram bot, single LLM orchestrator using tool-calling — domain logic
+lives in deterministic `tools/*.py` modules, not in prompts or agents.
 Deployed as a systemd service on Oracle Cloud (Ubuntu 22.04, ARM).
-Python 3.12. Virtual env must be named `venv` (not `.venv`).
+Python 3.12.
 
 ## Stack
 - python-telegram-bot v21 (polling mode)
-- OpenRouter API (free tier) — model: claude-sonnet-4-6 or current free model
-- SQLite for storage
-- Google Calendar API (OAuth)
+- OpenRouter via the `openai` SDK — model: `openai/gpt-4o-mini` (see `.env`)
+- SQLite for storage (`storage/db.py`, `storage/models.py`)
+- Google Calendar API (OAuth), USDA FoodData Central, BBC/Sky RSS, The Racing API, FPL public API
 
 ## Critical Rules
-- Never use `.venv` — use `venv` (Python 3.14 compatibility issue)
 - Verify nutrition values against USDA FoodData Central, never hardcode macros
 - Racing/sports results must use structured APIs, not RSS + LLM (hallucination risk)
 - OpenRouter model strings go stale — check if model is still active when adding new ones
+- No OpenRouter API calls in the pytest suite — mock everything, test deterministic logic directly
 
 ## Deployment Workflow
 Edit locally → git push → SSH into Oracle → git pull && sudo systemctl restart robin
 
 ## Code Style
-- Each agent lives in its own module under /agents/
-- Handlers in /handlers/, services in /services/
+- One tool module per domain under `tools/` (`tools/gym.py`, `tools/meal.py`,
+  etc.), each exporting `async def tool_name(conn, **kwargs) -> dict` plus a
+  `TOOL_SCHEMAS` list; `tools/registry.py` aggregates and dispatches them
+- Cross-cutting deterministic helpers (non-LLM) live in `services/`
 - Functions should do one thing; if it needs a long comment to explain it, split it
 - All API calls wrapped in try/except with meaningful error messages
 
 ## Testing
 - Run tests before any commit: `python -m pytest tests/ -v`
-- New agent features need at least one integration test
-- Tests live in /tests/ mirroring the module structure
+- New tools need at least one direct test in `tests/test_tools_<domain>.py`
+- Tests live in `/tests/` mirroring the `tools/`/`services/`/`bot/` module structure
 
 ## Common Commands
-- Start bot locally: `python bot.py`
+- Start bot locally: `python main.py`
 - Run tests: `python -m pytest tests/ -v`
+- Lint: `ruff check .`
 - Check logs on Oracle: `sudo journalctl -u robin -f`
 - Restart service: `sudo systemctl restart robin`
 ```
 
-Adjust as the project evolves. The CLAUDE.md is a living document — update it when you add agents, change the stack, or burn yourself on a recurring mistake.
+Adjust as the project evolves. The CLAUDE.md is a living document — update it when the architecture changes, the stack changes, or you burn yourself on a recurring mistake. (Robin's real, current `CLAUDE.md` is shorter than this template — that's fine; it doesn't need to restate everything above, just what's genuinely load-bearing.)
 
 ---
 
@@ -127,17 +134,24 @@ Robin is a personal project, not a bank. You don't need 100% coverage. You need 
 
 ### Test Structure
 
+Robin's actual convention — one flat `tests/` directory, filenames mirroring
+the module they test (`test_<folder>_<module>.py`):
+
 ```
 robin/
 ├── tests/
-│   ├── conftest.py          # Shared fixtures (mock Telegram bot, mock API responses)
-│   ├── test_gym_agent.py
-│   ├── test_meal_agent.py
-│   ├── test_calendar_agent.py
-│   ├── test_news_agent.py
-│   └── test_services/
-│       ├── test_nutrition.py
-│       └── test_racing.py   # When you replace the RSS feed
+│   ├── test_tools_gym.py
+│   ├── test_tools_meal.py
+│   ├── test_tools_calendar.py
+│   ├── test_tools_news.py
+│   ├── test_tools_fpl.py
+│   ├── test_tools_briefing.py
+│   ├── test_tools_reminders.py
+│   ├── test_services_nutrition.py
+│   ├── test_services_news.py
+│   ├── test_bot_fpl_jobs.py
+│   ├── test_tool_calling.py           # services/openrouter.py's tool-call loop
+│   └── fixtures/                       # test-only data, never imported by production code
 ```
 
 ### What to Test per Agent
@@ -272,7 +286,7 @@ From the patterns in your codebase, watch for these specific failure modes:
 |---|---|---|
 | Hardcoded nutrition values | Protein estimates are often 20–30% off | Unit test against USDA values |
 | Model string goes stale | OpenRouter silently fails or degrades | Log model name in each response during dev |
-| `.venv` vs `venv` | Bot won't start on Oracle | CLAUDE.md rule + test your deploy script |
+| `.venv` vs `venv` (local dev only) | Whichever one you last `pip install`ed into is the one that actually has packages | `pip list` in each before assuming either is current — as of this pass, `.venv` had the full dependency set and `venv` was missing packages including `pytest`, contradicting an earlier version of this doc's "always use `venv`" rule. Pick one, provision it fully, and say so here — this table entry should name the actual canonical choice, not assume one. The Oracle deployment has its own separate Linux venv; it's unaffected by whichever of these two you use locally. |
 | Timezone errors | Calendar events created in UTC not BST | Integration test with known event times |
 | RSS hallucination | Racing results fabricated | Use structured API; test that response matches source data format |
 | Moralising meal responses | Agent adds unsolicited commentary | Explicit phrase-matching test |
@@ -375,7 +389,7 @@ constraints, what's the cleanest solution to the original problem?"
 When you add a new agent or integration (e.g., Racing API, morning briefing), don't deploy blind. Use this pattern:
 
 ### Pre-Deploy Checklist
-- [ ] Feature works locally with `python bot.py`
+- [ ] Feature works locally with `python main.py`
 - [ ] Unit tests pass
 - [ ] You've tested the actual Telegram message output (read it; is it what you'd want to receive?)
 - [ ] External API call has error handling — what happens if it returns nothing?
@@ -456,7 +470,7 @@ ruff check .
 ruff format .
 
 # Local run
-python bot.py
+python main.py
 
 # Deploy
 git push origin main
@@ -473,10 +487,16 @@ sudo systemctl status robin
 | File | Purpose |
 |---|---|
 | `CLAUDE.md` | Global project context for Claude |
-| `CONTEXT.md` | High-level architecture notes |
-| `Gym-CONTEXT.md` | Gym agent domain knowledge |
-| `Mealplan-CONTEXT.md` | Meal agent domain knowledge |
-| `tests/conftest.py` | Shared test fixtures |
+| `docs/context/TOOL_CALLING_DESIGN.md` | Tool-calling architecture — cited by section number (bare filename, not path) throughout `tools/*.py` docstrings |
+| `docs/context/Gym-CONTEXT.md` | Gym domain knowledge |
+| `docs/context/Mealplan-CONTEXT.md` | Meal domain knowledge |
+| `docs/context/FPL-CONTEXT.md` | FPL strategy doctrine |
+| `docs/context/FPL-STATUS.md` | FPL current-season status/handover — read first for any FPL work |
+| `USER_GUIDE.md` | End-user-facing feature reference |
+| `docs/history/` | Completed phase briefs (PHASE1/2/3-BRIEF.md, PHASE3-ADDENDUM.md, AugustFeatures.md) — historical record, not open specs |
+
+(`CONTEXT.md`, an older duplicate high-level overview, was folded into
+`CLAUDE.md` and removed — don't recreate it as a second "project overview" doc.)
 
 ### The Cardinal Sins (Don't Do These)
 

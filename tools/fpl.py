@@ -28,7 +28,6 @@ import json
 import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 
 import config
 from services import fpl_calendar, fpl_client, fpl_league, fpl_xp
@@ -70,7 +69,7 @@ from storage.models import (
 
 logger = logging.getLogger(__name__)
 
-_TZ = ZoneInfo("Europe/London")
+_TZ = config.TZ
 
 _POSITION_NAMES = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
 _STATUS_LABELS = {

@@ -1,6 +1,9 @@
 # FPL-CONTEXT.md — Robin's Fantasy Premier League module
 
-**Status:** Design / pre-build. Written 20 Aug 2026.
+**Status:** Live — Phases 1-3 implemented and in production (see
+`FPL-STATUS.md`/`PHASE3-BRIEF.md` for current build state). Written 20 Aug
+2026; the doctrine/rules below remain the design reference — read "build
+order" language as historical, not a future plan.
 **Season:** 2026/27. **GW1 deadline: Fri 21 Aug 2026, 18:30 BST (17:30 UTC).**
 
 ---
@@ -361,10 +364,13 @@ You will be tempted to skip step 4. Don't. A confidently wrong recommendation at
 T-45min is worse than no recommendation.
 
 ### 4.2 The xP model — build order
-- **v0 (this season, week 1–4):** no model. Rank candidates on FPL's own `form`,
-  `points_per_game`, `expected_goal_involvements_per_90`, fixture FDR, and
-  minutes-certainty. Crude, and about 80% as good as anything fancier.
-- **v1:** Poisson / Dixon-Coles team-strength model fitted on results → per-fixture
+- **v0 (in use since GW1, still current — `services/fpl_xp.py:MODEL_VERSION`):**
+  no model. Rank candidates on FPL's own `form`, `points_per_game`,
+  `expected_goal_involvements_per_90`, fixture FDR, and minutes-certainty.
+  Crude, and about 80% as good as anything fancier.
+- **v1 (referred to as "Phase 4" in `PHASE3-BRIEF.md`'s build-order — not
+  started, deliberately deprioritised):** Poisson / Dixon-Coles team-strength
+  model fitted on results → per-fixture
   scoreline distribution → clean-sheet probability and goals-conceded distribution.
   Combine with per-90 xGI to get `xP = P(plays) × (appearance + xG·pos_mult +
   xA·3 + P(CS)·cs_mult + P(DefCon)·2 + E[bonus])`. **This is a genuine weekend or

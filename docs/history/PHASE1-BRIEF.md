@@ -1,5 +1,8 @@
 # Phase 1 brief — Robin FPL module, adherence layer
 
+**Status: implemented.** Kept as a historical build spec — see
+`FPL-STATUS.md` for current state.
+
 **Paste-in prompt for Claude Code:**
 > Read `FPL-CONTEXT.md` and `PHASE1-BRIEF.md` in this repo, then implement Phase 1
 > as specified. Match the existing Robin module conventions for config, logging,

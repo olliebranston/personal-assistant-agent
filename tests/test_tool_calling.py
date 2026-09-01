@@ -12,16 +12,18 @@ import json
 import sqlite3
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from zoneinfo import ZoneInfo
 
+import httpx
+import openai
 import pytest
 
-from agents.meal import CALORIE_TARGETS, PROTEIN_TARGET_G
+import config
+from services.meal_helpers import CALORIE_TARGETS, PROTEIN_TARGET_G
 from services import openrouter
 from storage.models import EXERCISE_SET_DDL, FOOD_LOG_DDL, GYM_SESSION_DDL, WEIGHT_LOG_DDL
 from tools.context import build_ambient_context
 
-_TZ = ZoneInfo("Europe/London")
+_TZ = config.TZ
 
 
 # ── Mock OpenRouter response helpers ────────────────────────────────────────
@@ -136,6 +138,57 @@ async def test_complete_stops_after_max_tool_iterations(monkeypatch):
 
     assert create_mock.call_count == 2
     assert isinstance(result, str) and result  # fallback string, not a crash
+
+
+# ── 429 handling ─────────────────────────────────────────────────────────────
+# This codebase has a documented history of rate-limit bugs (commit history:
+# "Fix 429 handling: catch via exception type, honest rate-limit message");
+# this was previously untested.
+
+
+def _make_api_error(message: str) -> openai.APIError:
+    return openai.APIError(
+        message,
+        request=httpx.Request("POST", "https://openrouter.ai/api/v1"),
+        body=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_complete_does_not_retry_a_429(monkeypatch):
+    """A 429 must fail immediately, not be retried — a 1-2s backoff can't
+    outrun a per-minute quota, so retrying would just burn extra calls."""
+    error = _make_api_error("Error code: 429 - rate limit exceeded")
+    create_mock = AsyncMock(side_effect=error)
+    monkeypatch.setattr(openrouter._client.chat.completions, "create", create_mock)
+
+    with pytest.raises(openai.APIError):
+        await openrouter.complete(
+            messages=[{"role": "user", "content": "hi"}],
+            max_attempts=3,
+        )
+
+    assert create_mock.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_complete_retries_a_non_429_error_before_succeeding(monkeypatch):
+    """Contrast case: a non-429 error IS retried (up to max_attempts), unlike
+    a 429 — confirms _is_rate_limit is actually gating retry, not disabling
+    it globally."""
+    error = _make_api_error("Error code: 503 - service unavailable")
+    response = _make_response(_make_message(content="Recovered.", tool_calls=None))
+    create_mock = AsyncMock(side_effect=[error, response])
+    monkeypatch.setattr(openrouter._client.chat.completions, "create", create_mock)
+    monkeypatch.setattr(openrouter.asyncio, "sleep", AsyncMock())
+
+    result = await openrouter.complete(
+        messages=[{"role": "user", "content": "hi"}],
+        max_attempts=3,
+    )
+
+    assert result == "Recovered."
+    assert create_mock.call_count == 2
 
 
 # ── Existing callers unaffected (tools=None) ────────────────────────────────

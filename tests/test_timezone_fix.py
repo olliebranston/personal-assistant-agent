@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-import agents.meal as agents_meal
+from services import meal_helpers
 import tools.gym as gym_tools
 import tools.meal as meal_tools
 from storage.models import (
@@ -69,11 +69,11 @@ def test_tools_meal_today_uses_uk_date_not_utc_date(monkeypatch):
     assert meal_tools._today() != _WRONG_UTC_DATE
 
 
-def test_agents_meal_today_uses_uk_date_not_utc_date(monkeypatch):
-    monkeypatch.setattr(agents_meal, "datetime", _FixedClock)
+def test_meal_helpers_today_uses_uk_date_not_utc_date(monkeypatch):
+    monkeypatch.setattr(meal_helpers, "datetime", _FixedClock)
 
-    assert agents_meal._today() == _EXPECTED_UK_DATE
-    assert agents_meal._today() != _WRONG_UTC_DATE
+    assert meal_helpers._today() == _EXPECTED_UK_DATE
+    assert meal_helpers._today() != _WRONG_UTC_DATE
 
 
 def test_tools_gym_weekly_summary_week_start_uses_uk_date(monkeypatch):

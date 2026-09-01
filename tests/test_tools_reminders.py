@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock
-from zoneinfo import ZoneInfo
+from unittest.mock import MagicMock
 
 import pytest
 
+import config
 from tools.reminders import create_reminder
 
-_TZ = ZoneInfo("Europe/London")
+_TZ = config.TZ
 
 
 def _make_context():
@@ -53,3 +53,23 @@ async def test_create_reminder_returns_error_for_time_in_past():
 
     assert result == {"error": "time_in_past"}
     telegram_context.job_queue.run_once.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_create_reminder_returns_error_when_job_queue_raises():
+    # create_reminder was the one tool in the codebase not honoring the
+    # standard {"error": ...} contract on failure — a job_queue exception
+    # would have reached the LLM as a raw, unhandled traceback instead.
+    telegram_context = _make_context()
+    telegram_context.job_queue.run_once.side_effect = RuntimeError("queue unavailable")
+    fire_at = datetime.now(tz=_TZ) + timedelta(hours=2)
+
+    result = await create_reminder(
+        conn=None,
+        telegram_context=telegram_context,
+        chat_id=12345,
+        text="call dentist",
+        when=fire_at.isoformat(),
+    )
+
+    assert "error" in result

@@ -33,7 +33,7 @@ def main() -> None:
         print("Download it from Google Cloud Console → APIs & Services → Credentials → OAuth 2.0 Client IDs.")
         sys.exit(1)
 
-    print(f"Opening browser for Google authentication...")
+    print("Opening browser for Google authentication...")
     print(f"Credentials: {creds_path}")
     print(f"Token will be saved to: {token_path}\n")
 

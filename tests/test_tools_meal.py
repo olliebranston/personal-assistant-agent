@@ -19,12 +19,14 @@ from storage.models import (
 )
 from tools.meal import (
     correct_food_log,
+    delete_food_log,
     get_daily_macros,
     get_food_log,
     get_weight_trend,
     log_food,
     log_weight,
     repeat_meal,
+    reset_daily_food_log,
     set_user_food_macros,
 )
 
@@ -113,6 +115,53 @@ async def test_log_food_returns_source_field():
     assert estimated["kcal"] == 0.0
     assert estimated["needs_input"] is True
     assert "needs_input" not in reference
+
+
+# ── daily_totals.summary_line / turn_totals ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_daily_totals_summary_line_matches_the_numbers():
+    conn = _make_conn()
+
+    result = await log_food(conn, food_name="Greek yoghurt", grams=200, meal_slot="breakfast")
+
+    totals = result["daily_totals"]
+    assert totals["summary_line"] == (
+        f"{totals['protein_g']:.0f}g protein / {totals['kcal']:.0f} kcal "
+        f"(target {totals['kcal_target']} kcal)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_log_food_turn_totals_accumulate_across_calls_sharing_one_dict():
+    conn = _make_conn()
+    turn_totals = {"protein_g": 0.0, "kcal": 0.0}
+
+    first = await log_food(conn, food_name="Greek yoghurt", grams=200, turn_totals=turn_totals)
+    second = await log_food(conn, food_name="oats", grams=80, turn_totals=turn_totals)
+
+    # Regression test: the running "Today" total previously got confused with
+    # a single entry's own macros — this asserts the turn accumulator is the
+    # true running sum across both calls, not just the latest one.
+    expected_protein = first["protein_g"] + second["protein_g"]
+    expected_kcal = first["kcal"] + second["kcal"]
+    assert second["turn_totals"]["protein_g"] == pytest.approx(expected_protein)
+    assert second["turn_totals"]["kcal"] == pytest.approx(expected_kcal)
+    assert second["turn_totals"]["summary_line"] == (
+        f"{expected_protein:.0f}g protein, {expected_kcal:.0f} kcal"
+    )
+    # daily_totals is unaffected by turn scoping — it's the true DB sum.
+    assert second["daily_totals"]["protein_g"] == pytest.approx(expected_protein)
+
+
+@pytest.mark.asyncio
+async def test_log_food_turn_totals_is_none_when_not_supplied():
+    conn = _make_conn()
+
+    result = await log_food(conn, food_name="oats", grams=80)
+
+    assert result["turn_totals"] is None
 
 
 # ── user_foods calibration table ────────────────────────────────────────────
@@ -237,6 +286,108 @@ async def test_correct_food_log_empty_food_name_matches_most_recent():
     assert result["after"]["description"] == "100g oats"
     assert result["after"]["protein_g"] == 17.0   # 17.0g/100g * 100g
     assert result["after"]["kcal"] == 389.0       # 389.0kcal/100g * 100g
+
+
+# ── delete_food_log / reset_daily_food_log ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_delete_food_log_by_id_removes_row_and_updates_totals():
+    conn = _make_conn()
+    today = date.today().isoformat()
+
+    logged = await log_food(conn, food_name="Greek yoghurt", grams=200, meal_slot="breakfast")
+    await log_food(conn, food_name="oats", grams=80, meal_slot="breakfast")
+
+    result = await delete_food_log(conn, log_id=logged["id"])
+
+    assert result["deleted"] is True
+    assert result["removed"]["id"] == logged["id"]
+    logs = get_food_logs_for_date(conn, today)
+    assert len(logs) == 1
+    assert logs[0]["food_name"] == "oats"
+    # Only oats (80g) should remain in the total — the yoghurt row is gone.
+    assert result["daily_totals"]["protein_g"] == 13.6
+
+
+@pytest.mark.asyncio
+async def test_delete_food_log_by_name_errors_when_ambiguous_and_deletes_nothing():
+    """Regression test for the actual reported bug: a duplicate entry could
+    not be reliably removed, and attempts to do so risked adding more rows
+    instead. Deletion must refuse to guess among duplicates."""
+    conn = _make_conn()
+    today = date.today().isoformat()
+
+    await log_food(conn, food_name="protein bar", grams=60, meal_slot="snack")
+    await log_food(conn, food_name="protein bar", grams=60, meal_slot="snack")
+
+    result = await delete_food_log(conn, food_name="protein bar")
+
+    assert "error" in result
+    assert len(result["candidates"]) == 2
+    logs = get_food_logs_for_date(conn, today)
+    assert len(logs) == 2  # nothing was deleted
+
+
+@pytest.mark.asyncio
+async def test_delete_food_log_by_id_succeeds_even_with_duplicates_present():
+    conn = _make_conn()
+    today = date.today().isoformat()
+
+    first = await log_food(conn, food_name="protein bar", grams=60, meal_slot="snack")
+    await log_food(conn, food_name="protein bar", grams=60, meal_slot="snack")
+
+    result = await delete_food_log(conn, log_id=first["id"])
+
+    assert result["deleted"] is True
+    logs = get_food_logs_for_date(conn, today)
+    assert len(logs) == 1
+    assert logs[0]["id"] != first["id"]
+
+
+@pytest.mark.asyncio
+async def test_delete_food_log_unknown_id_returns_error():
+    conn = _make_conn()
+    await log_food(conn, food_name="oats", grams=80)
+
+    result = await delete_food_log(conn, log_id=999999)
+
+    assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_delete_food_log_by_name_does_not_match_mid_word_substring():
+    # Found by adversarial review: a plain substring test lets a short needle
+    # like "oat" match unrelated entries such as "goat cheese" mid-word.
+    # Deletion is irreversible, so it must not silently remove the wrong
+    # entry just because the needle happens to appear inside another word.
+    conn = _make_conn()
+    today = date.today().isoformat()
+
+    await log_food(conn, food_name="goat cheese", grams=30)
+
+    result = await delete_food_log(conn, food_name="oat")
+
+    assert "error" in result
+    logs = get_food_logs_for_date(conn, today)
+    assert len(logs) == 1  # goat cheese entry untouched
+
+
+@pytest.mark.asyncio
+async def test_reset_daily_food_log_clears_all_and_returns_zeroed_totals():
+    conn = _make_conn()
+    today = date.today().isoformat()
+
+    await log_food(conn, food_name="Greek yoghurt", grams=200, meal_slot="breakfast")
+    await log_food(conn, food_name="oats", grams=80, meal_slot="breakfast")
+
+    result = await reset_daily_food_log(conn)
+
+    assert result["reset"] is True
+    assert result["removed_count"] == 2
+    assert result["daily_totals"]["protein_g"] == 0.0
+    assert result["daily_totals"]["kcal"] == 0.0
+    assert get_food_logs_for_date(conn, today) == []
 
 
 # ── get_food_log ─────────────────────────────────────────────────────────────

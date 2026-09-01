@@ -12,6 +12,7 @@ Robin is your personal assistant on Telegram. Just talk to it naturally — no c
 - **Manages your calendar** — reads and writes Google Calendar events with confirmation
 - **Sends you news** — Chelsea FC, world headlines, your horses (Racing API), today's calendar
 - **Sets reminders** — one-off alerts at any time you specify
+- **Runs your FPL team** — squad/team status, mini-league comparison, transfer and captaincy recommendations validated against live data, deadline reminders
 - **Proactively checks in** — morning briefing, mid-morning protein nudge, dinner prompt, end-of-day summary, Friday shopping list, Sunday batch cook recipe
 
 ---
@@ -20,7 +21,7 @@ Robin is your personal assistant on Telegram. Just talk to it naturally — no c
 
 | Time | What you get |
 |---|---|
-| **7:45am** | Morning brief: today's calendar events, training targets for every exercise, any horses running, Chelsea headline if fresh, breakfast suggestion |
+| **07:00** | Morning brief: today's calendar events, training targets for every exercise, any horses running, Chelsea headline if fresh, breakfast suggestion |
 | **10:30am (weekdays)** | Protein nudge if you've logged under 60g by that point — skips silently if you're on track |
 | **12:30pm (Tue/Wed/Thu)** | Lunch prompt showing yesterday's lunch — say "same lunch" to log it in one message |
 | **9:00pm** | Dinner prompt — reply with what you had and it's logged |
@@ -64,7 +65,13 @@ After your session, send your lifts in any natural format:
 bench 80kg 5×5, OHP 52.5kg 4×8, rope pulldowns 40kg 4×10, dips BW 4×10
 ```
 
-Robin infers the session type (push/pull/legs) from the exercises. If you hit less than 100g protein so far that day, it'll flag the post-workout window for a shake.
+Every exercise in the message gets logged in one go — Robin infers the
+session type (push/pull/legs) from the exercises. If you hit less than
+100g protein so far that day, it'll flag the post-workout window for a
+shake.
+
+**Noting a warm-up weight:** prefix it with `s` before the working weight,
+e.g. `bench s40 70kg 5x8` logs a 40kg warm-up and a 70kg working set.
 
 **Logging a run:**
 ```
@@ -83,7 +90,7 @@ how's my running?
 how did I do this week
 ```
 
-Running history shows your last 6 runs with the gap to your 20:00 5k goal.
+Running history shows your last 5 runs with the gap to your 20:00 5k goal.
 
 ---
 
@@ -115,9 +122,9 @@ Wrong? Say 'correct it' or e.g. 'change the oats to 20g protein'.
 
 If anything looks off (wrong USDA match, wrong portion), correct it immediately.
 
-### Correcting a logged entry
+### Correcting, deleting, or resetting a logged entry
 
-Three ways to correct, all work naturally:
+**Fixing a wrong value** on something already logged — three ways to say it, all work naturally:
 
 ```
 actually that was 300g Greek yoghurt
@@ -126,7 +133,17 @@ add 15g protein to that
 the oats should be 250g not 80g
 ```
 
-Robin finds the most recent matching entry and updates it, then shows your revised running total.
+Robin finds the most recent matching entry and updates it in place, then shows your revised running total.
+
+**Removing an entry entirely** — for a duplicate or something logged by mistake:
+
+```
+delete that
+remove the yoghurt, I logged it twice
+scrap today's log, I'm starting again
+```
+
+Robin confirms what it's about to remove before doing it (unless you've just unambiguously pointed at a single entry, e.g. "oops, delete that" right after logging it). If more than one entry could match what you said, it'll list them and ask which one rather than guessing — deleting the wrong entry can't be undone.
 
 ### Quick repeat on Tue/Wed/Thu
 
@@ -236,7 +253,7 @@ dinner at The Anchor Tuesday 7pm
 golf Saturday morning
 ```
 
-Robin will reply: *"I'll add: Dentist, Friday 13 Jun, 10:00am — shall I?"*
+Robin will reply: *"I'll add: Dentist, 13 Jun, 10:00am–10:30am — that right?"*
 
 Reply **yes** to confirm, or describe what to change.
 
@@ -257,6 +274,37 @@ Returns four sections:
 2. **World** — top geopolitical stories (last 24h from BBC World)
 3. **Your horses** — today and tomorrow's entries from the Racing API (course, off time, distance, going, form)
 4. **Today's calendar** — a one-liner of what you've got on
+
+---
+
+## FPL
+
+`/fpl` isn't a real Telegram command — it's just literal text that reaches
+the same natural-language pipeline as everything else, so plain English
+works identically:
+
+```
+/fpl
+what's my squad look like
+/fpl team
+/fpl league
+how's the mini-league going
+/fpl chips
+when should I use my chips
+/fpl done
+```
+
+- **`/fpl` (or general status)** — squad with prices/flags, last gameweek's
+  points, overall rank, league position, next deadline.
+- **`/fpl team`** — starting XI and bench, grouped by position, captain/vice marked.
+- **`/fpl league`** — mini-league table with rank movement, plus how you compare
+  to rivals: differentials, template holes, who's captaining what.
+- **`/fpl chips`** — which chips are used/available across both halves of the season.
+- **A recommendation** ("what should I do this week", "should I take a hit") —
+  transfers, captaincy, and chip advice, checked against live FPL data before
+  being shown to you (it never invents a player or price).
+- **`/fpl done`** — silences the pre-deadline reminder nudges for the
+  upcoming gameweek once you've made your moves.
 
 ---
 
@@ -293,7 +341,7 @@ half portion of rice
 
 **USDA sometimes mismatches** — less common foods, branded products, or vague descriptions occasionally pull the wrong entry. If the protein looks wrong, correct it immediately with "change the [food] to Xg protein" before logging anything else.
 
-**The correction flow works best on the same day** — Robin always targets the most recent matching entry for today. If you need to correct something from yesterday, be specific: "change yesterday's chicken to 62g protein".
+**Correction only ever reaches today's log** — it can't touch yesterday's entries no matter how you phrase it, there's currently no way to fix an old entry. If you want a duplicate or bad entry gone rather than fixed, say so directly (see "Removing an entry entirely" above) — that's the reliable path, not re-logging or re-correcting the same item.
 
 ---
 
@@ -316,6 +364,8 @@ half portion of rice
 | Running progress | "how's my running" |
 | Log food | just describe what you ate |
 | Fix a wrong entry | "change the chicken to 62g protein" |
+| Remove an entry | "delete that" / "remove the yoghurt" |
+| Reset today's log | "scrap today's log" |
 | Repeat yesterday's meal | "same breakfast" / "same lunch" (Tue–Thu) |
 | Today's macros | "what's my protein today" / "summary" |
 | Macros remaining | "how much left" |
@@ -330,3 +380,6 @@ half portion of rice
 | Add event | "dentist Friday 10am" |
 | News | "news" or /news |
 | Reminder | "remind me at 3pm to call X" |
+| FPL status | "/fpl" or "what's my squad look like" |
+| FPL recommendation | "what should I do this week" |
+| Mini-league comparison | "/fpl league" |

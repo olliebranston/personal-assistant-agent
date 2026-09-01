@@ -1,6 +1,15 @@
 # Tool-Calling Architecture — Design Document
 
-Status: **draft for review — no implementation yet**
+Status: **Implemented.** §1, §3, and §4 (architecture, context system, tool
+execution loop) describe the system as it actually works today — verified
+against `main.py`, `services/openrouter.py`, and `tools/*.py`. §2 (the tool
+catalog) has been regenerated below to match the current `tools/registry.py`
+dispatch table; it drifted significantly out of date as tools were added
+(FPL didn't exist when this doc was written) and reshaped (e.g. gym's
+`log_exercise` was replaced by `log_exercises`, meal gained
+`delete_food_log`/`reset_daily_food_log`). §5-§7 are kept as a historical
+record of the decisions made during the migration — read them in the past
+tense, not as open questions.
 
 ## 1. Overview
 
@@ -61,138 +70,213 @@ tool returns, and conversation history.
 
 ## 2. Tool Catalog
 
-21 tools, grouped by domain. For each: signature with types, return shape,
-what it maps to in the current code, and any behaviour notes. "Maps to"
-references are the *source of logic* to port, not files that survive
-unchanged.
+32 tools across 7 domains, as actually registered in
+`tools/registry.py:build_tool_registry`'s dispatch table (7 gym, 12 meal, 2
+calendar, 1 news, 1 briefing, 1 reminders, 8 FPL). All tools are
+`async def tool_name(conn, **kwargs) -> dict`, `conn` bound once per
+incoming message via `functools.partial` (see §4.3) — except
+`create_reminder`, which also gets `telegram_context`/`chat_id` bound the
+same way. Regenerated from the current code rather than kept as the
+original migration plan — return shapes below are the real dict keys each
+function returns, verified against `tools/*.py`.
 
-All tools are `async def tool_name(conn, **kwargs) -> dict`. `conn` is a
-single SQLite connection opened once per incoming message in
-`route_message()` and threaded through the whole tool-call loop (mirrors how
-each `agents/*.handle()` opens its own connection today, just hoisted one
-level up).
+### 2.1 Gym tools (`tools/gym.py`)
 
-### 2.1 Gym tools
+#### `log_exercises(exercises: list[dict], session_type: str | null = null) -> dict`
 
-#### `log_exercise(exercise_name: str, weight_kg: float | null, sets: int, reps: int, notes: str | null = null) -> dict`
-
-- **Returns:** `{"logged": true, "session_id": int, "session_type": str, "exercise": str, "sets": int, "reps": int, "weight_kg": float|null, "notes": str|null}`
-- **Maps to:** `agents/gym.py:_log_workout` + `storage/models.py:insert_session`/`insert_set`. Today a whole session (multiple exercises) is parsed from one message via `_LOG_PARSER_SYSTEM` and written in one go; the tool-calling model instead calls `log_exercise` once per exercise it identifies in the message.
-- **Notes:** Needs a "find or create today's session" step — see §3.2(d) for how the tool decides whether to append to an existing `gym_session` row for today or create a new one, and how it infers `session_type` when not explicitly stated.
+Logs every exercise in one message as a **single atomic call** — `exercises`
+is a list of `{exercise_name, sets, reps, weight_kg, warmup_kg, notes}`
+items (even one exercise is a 1-item list). Replaced the original
+`log_exercise` (one call per exercise) after that design proved unreliable
+in practice: the model didn't always self-issue one call per exercise
+mentioned, silently dropping items from multi-exercise messages. Resolves
+or creates today's `gym_sessions` row (append if one exists for today,
+else create using `session_type` or the PPL-cycle fallback).
+**Returns:** `{"logged": true, "session_id": int, "session_type": str, "exercises": [{"exercise": str, "sets": int, "reps": int, "weight_kg": float|null, "warmup_kg": float|null, "notes": str|null}]}` or `{"error": str}` (every item validated before any write, so a malformed item writes nothing rather than partially logging).
 
 #### `get_last_session(session_type: str) -> dict`
 
-- **Returns:** `{"found": bool, "date": str|null, "session_type": str, "exercises": [{"exercise": str, "sets": int, "reps": int, "weight_kg": float|null, "notes": str|null}]}`
-- **Maps to:** `agents/gym.py:_get_last_session_of_type` (data already structured this way internally — `_format_last_session` is the formatting step that gets dropped; the model formats the reply itself).
+**Returns:** `{"found": bool, "date": str|null, "session_type": str, "exercises": [{"exercise": str, "sets": int, "reps": int, "weight_kg": float|null, "notes": str|null}]}`
 
-#### `get_session_plan(session_type: str) -> dict`
+#### `get_exercise_history(exercise_name: str, limit: int = 5) -> dict`
 
-- **Returns:** `{"session_type": str, "exercises": [{"exercise": str, "target_sets": int, "target_reps": str, "notes": str|null}]}`
-- **Maps to:** the static `_SESSION_PLANS` dict in `agents/gym.py`. New tool — needed so the model can answer "what's on legs day" or open a session by telling the user the plan, without that logic living in a prompt.
+Recent logged sets for one exercise, newest first — matches across known
+abbreviations/aliases (`normalize_exercise_name`, e.g. "incline db bench" ↔
+"incline dumbbell bench"), not just an exact string.
+**Returns:** `{"exercise": str, "entries": [{"date": str, "sets": int, "reps": int, "weight_kg": float|null, "notes": str|null}]}`
+
+#### `get_exercise_progression(exercise_name: str) -> dict`
+
+Computes the next sets/reps/weight recommendation from history (the
+`_PROGRESSION_CYCLE`/`_PROGRESSION_INCREMENT_KG` rule — see
+`Gym-CONTEXT.md`'s Progressive Overload section). Uses the same
+name-matching as `get_exercise_history`.
+**Returns (found):** `{"exercise": str, "found": true, "basis": {"date": str, "weight_kg": float, "sets": int, "reps": int}, "recommended_weight_kg": float, "recommended_sets": int, "recommended_reps": int}`. **Returns (no weighted history):** `{"exercise": str, "found": false}`.
 
 #### `get_next_session_type() -> dict`
 
-- **Returns:** `{"session_type": str, "cycle_position": str}`
-- **Maps to:** `agents/gym.py:get_next_session_type` (PPL cycle logic against `_PPL_CYCLE` + last logged session). New tool, used by `get_morning_briefing_data` today and now also directly callable ("what session am I due?").
+**Returns:** `{"session_type": str, "cycle_position": str}` (e.g. `"2/3"`), from the PPL cycle against the most recent logged session.
+
+#### `get_session_plan(session_type: str) -> dict`
+
+For push/pull/legs, merges `get_exercise_progression` per exercise
+in-process (the model doesn't need to chain separate calls) — each item
+carries `basis: "progression"` (real weight computed) or `"static"` (no
+history yet, static target). short/run session types return the static
+plan as-is, no `basis` field.
+**Returns:** `{"session_type": str, "exercises": [{"exercise": str, "sets": int, "reps": int|str, "weight_kg": float|null, "notes": str|null, "basis": "progression"|"static"}]}`
 
 #### `get_weekly_gym_summary() -> dict`
 
-- **Returns:** `{"week_start": str, "sessions": [{"date": str, "session_type": str, "exercise_count": int}], "session_count": int}`
-- **Maps to:** `agents/gym.py:_week_summary` (currently formats text; tool returns the underlying `get_recent_sessions` data shaped for the model).
+**Returns:** `{"week_start": str, "sessions": [{"date": str, "session_type": str, "exercise_count": int}], "session_count": int}`
 
-### 2.2 Meal & nutrition tools
+### 2.2 Meal & nutrition tools (`tools/meal.py`)
+
+Robin tracks **protein (g) and total kcal only** — there is no
+`carbs_g`/`fat_g` field anywhere in this schema, deliberately (see
+`Mealplan-CONTEXT.md`). Every macro-total result also carries a
+pre-formatted `summary_line` string (and `log_food`/`repeat_meal` an
+additional turn-scoped `turn_totals` block) — the system prompt requires
+copying these verbatim rather than the model re-summing figures itself,
+since that hand-arithmetic was the root cause of a real "today's total"
+bug.
 
 #### `log_food(food_name: str, grams: float, meal_slot: str | null = null) -> dict`
 
-- **Returns:** `{"logged": true, "id": int, "food_name": str, "grams": float, "calories": float, "protein_g": float, "carbs_g": float, "fat_g": float, "source": "usda"|"fallback"|"estimate", "meal_slot": str|null}`
-- **Maps to:** `agents/meal.py:_log_food` + `services/nutrition.py:lookup_macros` + `storage/models.py:insert_food_log`.
-- **Behaviour change (flagged, §5.1):** today this is staged via `services/state.py` ("food_log" pending confirmation) unless auto-confirmed. In the new design, `log_food` **writes immediately** and returns the computed macros; the model relays them in its reply ("Logged 150g chicken breast — 247 kcal / 46g protein"). Mistakes are fixed via `correct_food_log` after the fact.
+Writes immediately — no confirmation step (§5.1's recommendation, adopted).
+**Returns:** `{"logged": true, "id": int, "food_name": str, "grams": float, "protein_g": float, "kcal": float, "source": "usda"|"reference"|"user_defined"|"estimated", "meal_slot": str, "daily_totals": {...macros vs target, see get_daily_macros...}, "turn_totals": {"protein_g": float, "kcal": float, "summary_line": str}|null, "needs_input"?: true}`
+
+#### `correct_food_log(food_name: str = "", field: "quantity_g"|"protein_g" = "quantity_g", new_value: float = 0) -> dict`
+
+Fixes a value on an entry already logged **today** — it has no date
+parameter and cannot reach a prior day's log. Matches `food_name` as a
+substring against today's entries (empty string = most recent). Edits one
+row in place; never removes a row (see `delete_food_log` for that).
+**Returns:** `{"updated": true, "before": {...}, "after": {...}, "daily_totals": {...}}` or `{"error": str}`.
+
+#### `delete_food_log(log_id: int | null = null, food_name: str = "") -> dict`
+
+Removes an entry entirely — for a duplicate or mistaken log, never for
+fixing a value. Prefer `log_id` (exact); if only `food_name` is given and
+more than one entry matches, this returns the candidates and deletes
+nothing rather than guessing.
+**Returns:** `{"deleted": true, "removed": {...}, "daily_totals": {...}}` or `{"error": str, "candidates"?: [...]}`.
+
+#### `reset_daily_food_log(date: str | null = null) -> dict`
+
+Deletes every entry for a date (default today) — irreversible; the prompt
+requires confirming with Ollie first.
+**Returns:** `{"reset": true, "date": str, "removed_count": int, "daily_totals": {...}}`.
+
+#### `set_user_food_macros(food_name: str, protein_per_100g: float, kcal_per_100g: float) -> dict`
+
+Stores a calibrated value (checked before USDA on every future lookup) and
+fixes today's most recent matching entry — used after `log_food` returns
+`needs_input: true`.
+**Returns:** `{"stored": true, "food_key": str, "updated_log": {...}|null, "daily_totals"?: {...}}`.
 
 #### `get_food_log(date: str) -> dict`
 
-- **Returns:** `{"date": str, "entries": [{"id": int, "food_name": str, "grams": float, "calories": float, "protein_g": float, "carbs_g": float, "fat_g": float, "meal_slot": str|null, "logged_at": str}]}`
-- **Maps to:** new tool — no direct existing wrapper, but the data is exactly `storage/models.py:get_food_logs_for_date`. Required so the model can (a) find the right row for `correct_food_log` ("that should be 200g not 150g" — model needs the `id`), and (b) implement "repeat yesterday's meal" by reading yesterday's entries (see §5.2).
+**Returns:** `{"date": str, "entries": [{"id": int, "description": str, "meal_slot": str, "protein_g": float, "kcal": float, "source": str}], "totals": {"protein_g": float, "kcal": float}}`
 
-#### `correct_food_log(food_name: str, field: str, new_value: str | float) -> dict`
+#### `repeat_meal(meal_slot: str, source_date: str | null = null) -> dict`
 
-- **Returns:** `{"updated": true, "entry": {"id": int, "food_name": str, "grams": float, "calories": float, "protein_g": float, "carbs_g": float, "fat_g": float, "meal_slot": str|null}}` or `{"error": "no matching entry found for today"}`
-- **Maps to:** `agents/meal.py:_correct_log` + `storage/models.py:update_food_log`. `field` is one of `grams|food_name|meal_slot`; for `grams`/`food_name` changes the tool re-runs `lookup_macros` to recompute calories/protein/carbs/fat, matching today's behaviour.
+Re-logs a prior day's meal (default yesterday) for one slot — matches
+strictly on `meal_slot`, never recency, so an intervening snack can't be
+mistaken for the meal being repeated. Re-runs the nutrition lookup per
+item so any calibration since then is reflected.
+**Returns:** `{"logged": true, "meal_slot": str, "source_date": str, "items": [...], "daily_totals": {...}, "turn_totals": {...}|null}` or `{"error": str}`.
 
-#### `get_daily_macros(date: str) -> dict`
+#### `get_daily_macros(date: str | null = null) -> dict`
 
-- **Returns:** `{"date": str, "calories": float, "protein_g": float, "carbs_g": float, "fat_g": float, "target_calories": int, "target_protein_g": int, "remaining_calories": float, "remaining_protein_g": float, "is_weights_day": bool}`
-- **Maps to:** `storage/models.py:get_daily_totals` + `agents/meal.py:_get_calorie_target` + `_remaining_macros`.
+**Returns:** `{"date": str, "protein_g": float, "kcal": float, "protein_target": int, "kcal_target": int, "protein_remaining": float, "kcal_remaining": float, "is_weights_day": bool, "summary_line": str}`
 
 #### `get_weekly_macro_summary() -> dict`
 
-- **Returns:** `{"week_start": str, "days": [{"date": str, "calories": float, "protein_g": float}], "avg_calories": float, "avg_protein_g": float}`
-- **Maps to:** `agents/meal.py:_week_summary` + `storage/models.py:get_week_logs` (structured, not formatted).
+**Returns:** `{"week_start": str, "days": [{"date": str, "protein_g": float, "kcal": float, "entries": int}], "avg_protein_g": float, "avg_kcal": float, "day_count": int}`
 
 #### `get_recipe(recipe_name: str) -> dict`
 
-- **Returns:** `{"found": bool, "name": str, "slug": str, "category": str, "time_mins": int, "protein_g": int, "ingredients": [{"item": str, "qty": float|str, "unit": str|null}], "method": [str]}`
-- **Maps to:** `data/recipes.py:find_recipe` (currently fed into `format_recipe` for a text reply; tool returns the raw dict and the model formats it).
+**Returns (found):** `{"found": true, "name": str, "slug": str, "category": str, "serves": int, "time_mins": int, "protein_g": int, "kcal": int|null, "ingredients": [...], "method": [...]}`. **Returns (not found):** `{"found": false, "query": str, "available_weekday_dinners": [str], "available_weekend_dinners": [str]}`.
 
-#### `suggest_meal(meal_type: str) -> dict`
+#### `suggest_meal(meal_type: "breakfast"|"lunch"|"dinner"|"snack") -> dict`
 
-- **Returns:** `{"meal_type": str, "suggestion": str, "recipe_slug": str|null, "rotation_day": str|null}`
-- **Maps to:** `agents/meal.py:_suggest_meal` + breakfast/lunch/dinner rotation dicts + `get_lunch_rotation`/`get_breakfast`. `meal_type` ∈ `breakfast|lunch|dinner`.
+**Returns:** `{"meal_type": str, "suggestion": str, "recipe_slug": str|null, "rotation_day": str|null}`
+
+#### `generate_meal_plan(week_start: str | null = null) -> dict`
+
+**Returns:** `{"week_start": str, "days": {"<weekday>": {"breakfast": str, "lunch": str, "dinner": str}}}` (also persists the plan to `meal_plans`).
 
 #### `log_weight(weight_kg: float) -> dict`
 
-- **Returns:** `{"logged": true, "date": str, "weight_kg": float, "trend_kg_per_week": float|null}`
-- **Maps to:** `agents/meal.py:_handle_weight` + `storage/models.py:log_weight` (trend computed via `get_weight_history`, same as `_weight_trend`).
+Rejects values outside 50-250kg.
+**Returns:** `{"logged": true, "date": str, "weight_kg": float, "trend_kg_per_week": float|null}` or `{"error": str}`.
 
-#### `get_weight_trend() -> dict`
+#### `get_weight_trend(limit: int = 8) -> dict`
 
-- **Returns:** `{"entries": [{"date": str, "weight_kg": float}], "trend_kg_per_week": float|null, "latest_weight_kg": float|null}`
-- **Maps to:** `agents/meal.py:_weight_trend` + `storage/models.py:get_weight_history`.
+**Returns:** `{"entries": [{"date": str, "weight_kg": float}], "trend_kg_per_week": float|null, "latest_weight_kg": float|null}`
 
-#### `generate_meal_plan(week_start: str) -> dict`
+*(There is no `get_shopping_list` tool — the shopping list is generated as
+part of the Friday scheduled job / `generate_meal_plan`, not a standalone
+callable tool. An earlier version of this doc planned one; it was never built.)*
 
-- **Returns:** `{"week_start": str, "days": {"<weekday>": {"breakfast": str, "lunch": str, "dinner": str}}}`
-- **Maps to:** `agents/meal.py:_generate_week_plan`, used by the Friday scheduled job (`build_friday_summary`).
-
-#### `get_shopping_list(week_start: str) -> dict`
-
-- **Returns:** `{"week_start": str, "items": [{"item": str, "qty": float|str, "unit": str|null}]}`
-- **Maps to:** `agents/meal.py:_derive_shopping_list`, derives from `generate_meal_plan` output minus `PANTRY_STAPLES`.
-
-### 2.3 Calendar tools
+### 2.3 Calendar tools (`tools/calendar.py`)
 
 #### `get_calendar_events(time_min: str, time_max: str) -> dict`
 
-- **Returns:** `{"events": [{"summary": str, "start": str, "end": str, "location": str|null, "all_day": bool, "calendar": str}]}`
-- **Maps to:** `services/google_calendar.py:list_events` (already returns near this shape; tool adds an `all_day` flag derived from whether the API gave `date` vs `dateTime`).
+**Returns:** `{"events": [{"summary": str, "start": str, "end": str, "location": str|null, "all_day": bool, "calendar": str}]}` or `{"error": "calendar_unavailable"}`.
 
-#### `create_calendar_event(summary: str, start: str, end: str, location: str | null = null, all_day: bool = false) -> dict`
+#### `create_calendar_event(summary: str, start: str, end: str, location: str = "", all_day: bool = false) -> dict`
 
-- **Returns:** `{"created": true, "event_id": str, "summary": str, "start": str, "end": str, "location": str|null, "calendar": str}` or `{"error": "..."}`
-- **Maps to:** `services/google_calendar.py:create_event`. **Requires extension** — currently only builds `{"dateTime": ..., "timeZone": "Europe/London"}`; needs an `all_day` branch building `{"date": "YYYY-MM-DD"}` instead (§5.3).
-- **Behaviour change:** today's mandatory confirm-before-create via `services/state.py` (`event_create` pending state) is replaced by a **propose-then-wait** pattern driven by the system prompt + conversation history (§3.2c) — the model proposes the event in plain text first, and only calls this tool after the user confirms in their next message.
+Only called after Ollie confirms in his next message — propose-then-wait
+per §3.2c, driven by the system prompt, no code-level state machine.
+**Returns:** `{"created": true, "summary": str, "start": str, "end": str, "location": str|null, "calendar": str}` or `{"error": "calendar_unavailable"|"create_failed"}`.
 
-### 2.4 News tool
+### 2.4 News tool (`tools/news.py`)
 
 #### `get_news() -> dict`
 
-- **Returns:** `{"chelsea": [{"title": str, "summary": str|null, "published": float}], "world": [{"title": str, "summary": str|null}], "horses_today": [...], "horses_upcoming": [...]}`
-- **Maps to:** `services/news.py:fetch_chelsea_items`, `fetch_world_news_items`, `fetch_all_horse_items` (via `asyncio.gather`, same as `agents/news.py:handle` does today).
-- **Behaviour change:** today's flow makes 2 *additional* LLM summarisation calls (`_CHELSEA_SYSTEM`, `_WORLD_SYSTEM`) on top of the router classification. The tool returns **raw item data**; the single top-level model call composes the summary as part of its normal reply. Net effect: 3 LLM calls → 1.
+**Returns:** `{"chelsea": [...], "world": [...], "horses": {...}, "today_calendar": [{"summary": str, "start_time": str, "location": str|null}]}` — each source wrapped so one failing fetch (e.g. a dead RSS feed) doesn't fail the others.
 
-### 2.5 Reminders
+### 2.5 Reminders (`tools/reminders.py`)
 
 #### `create_reminder(text: str, when: str) -> dict`
 
-- **Returns:** `{"created": true, "text": str, "fire_at": str}` or `{"error": "that time has already passed"}`
-- **Maps to:** `main.py:_set_reminder` (the JSON-parsing LLM call this function makes today is no longer needed — the top-level model already extracts `text`/`when` as tool arguments; `when` is an ISO 8601 datetime string the model resolves itself using the date-math rules in the system prompt, §3.4).
-- **Notes:** the only tool needing access to `context.job_queue` and `chat_id` — these are closure-bound when the per-request tool registry is built in `route_message()` (§4.3), breaking the otherwise-uniform `(conn, **kwargs)` signature. Implementation: `tools/reminders.py` exports a factory `make_create_reminder(context, chat_id)` returning the actual async tool function.
+The one tool bound to `telegram_context`/`chat_id` in addition to `conn`
+(see §4.3) since it needs `job_queue` to schedule the callback.
+**Returns:** `{"scheduled": true, "text": str, "fire_at": str}` or `{"error": "invalid_time"|"time_in_past", "detail"?: str}`.
 
-### 2.6 Composite / briefing
+### 2.6 Composite / briefing (`tools/briefing.py`)
 
 #### `get_morning_briefing_data() -> dict`
 
-- **Returns:** `{"date": str, "day_name": str, "calendar_events": [str], "gym_targets": [str], "horses_today": [str], "chelsea_headline": str|null, "world_headlines": [str], "breakfast_suggestion": str, "calorie_target": int, "is_weekend": bool}`
-- **Maps to:** the data-gathering portion of `bot/scheduler.py:_morning_briefing` — `_get_today_calendar_events`, `_get_gym_targets`, `_get_horses_today`, `_get_chelsea_headline`, `_get_world_headlines`, `meal_agent.get_breakfast`. Used both by the scheduled job (§4.4) and on-demand if the user asks "give me my briefing".
+Assembles calendar/gym/nutrition/news data for the morning briefing job in
+one call — each source individually wrapped so a failure in one (e.g. the
+racing API being rate-limited) doesn't block the rest; falls back to the
+`_DEFAULT_*` constants in `tools/briefing.py` per source.
+
+### 2.7 FPL tools (`tools/fpl.py`)
+
+Eight tools added after this document was originally written — Fantasy
+Premier League squad/team management, mini-league comparison, and
+recommendations, per `FPL-CONTEXT.md`'s doctrine. Each returns a
+domain-specific dict too large to usefully flatten here; read
+`tools/fpl.py`'s own `TOOL_SCHEMAS` descriptions for exact shapes. Names
+and purpose:
+
+- `get_fpl_squad()` — current 15-man squad with live prices/status.
+- `get_fpl_team()` — starting XI/bench, formation, captain/vice.
+- `get_fpl_league()` — mini-league standings plus rival-relative EO,
+  differentials, template holes, captains above Ollie in the league.
+- `get_fpl_gw_review(gw: int)` — points breakdown for a past gameweek.
+- `get_fpl_chips()` — chip usage/availability across both halves of the season.
+- `get_fpl_calendar(horizon: int = 8)` — blank/double gameweek detection ahead.
+- `get_fpl_recommendation()` — the full transfer/captaincy/chip
+  recommendation, validated against live data by `services/fpl_validate.py`
+  before being returned (the "hallucination firewall" — see
+  `FPL-CONTEXT.md` §4.1) — never fabricated by the model.
+- `fpl_acknowledge()` — marks the current gameweek's reminder ladder as
+  actioned, stopping further nudges.
 
 ---
 
@@ -253,7 +337,7 @@ A block of **structured, always-current** data, rebuilt from the DB on every inc
 [Current user message]
 ```
 
-Tool definitions themselves (§2, 21 tools) are passed via the API's native
+Tool definitions themselves (§2, 32 tools) are passed via the API's native
 `tools=[...]` parameter, not inlined into the prompt text — this is what
 lets the model do structured argument-extraction natively instead of via
 `_extract_json` + a hand-rolled JSON schema in prose.
@@ -519,16 +603,17 @@ this column.
 - `main.py` — `route_message` rewritten per §4.3; `main()`'s handler
   registration shrinks (no more per-domain command handlers, see above).
 
-### New
+### New (as actually built — see §2 for the current, real catalog)
 
 - `tools/gym.py`, `tools/meal.py`, `tools/calendar.py`, `tools/news.py`,
-  `tools/reminders.py`, `tools/briefing.py` — 21 tool implementations +
-  `TOOL_SCHEMAS`.
+  `tools/reminders.py`, `tools/briefing.py`, and `tools/fpl.py` (added later,
+  postdates this doc) — 32 tool implementations + `TOOL_SCHEMAS`.
 - `tools/registry.py` — aggregates schemas + dispatch, builds the
-  per-request `tool_executor` (binds `create_reminder`'s `context`/`chat_id`).
-- Ambient context block builder (§3.3) — likely `tools/context.py` or a
-  function in `tools/registry.py`.
-- The single combined system prompt (§3.4) — likely `tools/prompts.py`.
+  per-request `tool_executor` (binds `create_reminder`'s `context`/`chat_id`,
+  and a per-message `turn_totals` accumulator into `log_food`/`repeat_meal`).
+- `tools/context.py` — the ambient context block builder (§3.3), as predicted.
+- The single combined system prompt (§3.4) lives inline in `main.py` as
+  `_ROBIN_SYSTEM` — there is no separate `tools/prompts.py` file.
 
 ---
 

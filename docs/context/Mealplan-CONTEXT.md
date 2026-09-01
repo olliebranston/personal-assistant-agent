@@ -20,25 +20,32 @@
 
 ## Daily Macro Targets — With Honest Caveats
 
+**Robin tracks protein (g) and total kcal only — deliberately, not a gap.**
+Fat and carbs are not logged or targeted; don't build toward tracking them.
+
 | Macro | g/day | kcal | Basis | Honesty check |
 |-------|-------|------|-------|----------------|
 | Protein | **230g** | 920 | 2.2g/kg | Upper end of evidence. ISSN says 1.4–2.0g/kg is sufficient for most athletes. 2.2g/kg is safe and gives a margin; at 1.8g/kg you'd need ~189g with ~95% of the benefit. 230g is a reasonable target but not sacrosanct — hitting 190g+ consistently beats chasing 230g and burning out. |
-| Fat | **84g** | 756 | 0.8g/kg | This is the confirmed *minimum* for hormonal health (testosterone production etc.), not an ideal. 20–25% of total calories from fat is the standard guidance — at 3,150 kcal, 84g = 24%. ✅ Don't go lower. |
-| Carbs | **~370g** | 1,480 | Remainder | Fills the gap after protein and fat. Carbs fuel training — on heavy gym days, let this creep up to 400–420g rather than under-fuelling sessions. |
-| **Total** | | **~3,156 kcal** | | |
-
-**Calorie maths reference:** Protein = 4 kcal/g. Carbs = 4 kcal/g. Fat = 9 kcal/g. Alcohol = 7 kcal/g (not a macro, but counts).
+| **Total kcal** | | **~3,150 kcal** | Recomp target (~300 kcal deficit) | See the training/rest-day split below — this is the "default" figure before that split applies. |
 
 ---
 
 ## Training Day vs Rest Day Calories
 
-| Day type | Target | Rationale |
-|----------|--------|-----------|
-| Weights day | 3,200–3,400 kcal | Higher carbs to fuel session + support muscle protein synthesis |
-| Cycling commute day | 3,100–3,200 kcal | Moderate extra burn (~300–500 kcal depending on distance/effort) |
-| Sport day (padel, football etc.) | 3,200–3,400 kcal | These burn more than people think — treat like training |
-| Rest day | 2,900–3,000 kcal | Natural deficit; don't force it below 2,800 |
+Robin only distinguishes two states (`tools/meal.py:CALORIE_TARGETS`) — it
+checks whether a push/pull/legs session was logged today, nothing more
+granular than that:
+
+| Day type (as coded) | Target | Rationale |
+|----------------------|--------|-----------|
+| Weights day (push/pull/legs logged today) | **3,300 kcal** | Higher carbs to fuel session + support muscle protein synthesis |
+| Rest day (anything else) | **2,950 kcal** | Natural deficit; don't force it below 2,800 |
+| Default (no gym history yet to check) | **3,150 kcal** | Fallback before any session is logged |
+
+Cycling commutes and sport days (padel, football, etc.) aren't separate
+categories in the code — they burn more than people think, so treat a big
+effort day as a soft nudge toward the weights-day figure rather than a
+tracked category of its own.
 
 ---
 

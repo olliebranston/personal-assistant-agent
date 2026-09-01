@@ -60,17 +60,25 @@ def build_tool_registry(
         *fpl.TOOL_SCHEMAS,
     ]
 
+    # Turn-scoped, never part of the LLM-facing schema — accumulates the
+    # "this turn" macro total across possibly-multiple log_food/repeat_meal
+    # calls within one incoming message so the model can relay it verbatim
+    # instead of re-summing tool results itself (see tools/meal.py).
+    turn_totals: dict[str, float] = {"protein_g": 0.0, "kcal": 0.0}
+
     dispatch: dict[str, ToolFunc] = {
-        "log_exercise": functools.partial(gym.log_exercise, conn),
+        "log_exercises": functools.partial(gym.log_exercises, conn),
         "get_last_session": functools.partial(gym.get_last_session, conn),
         "get_exercise_history": functools.partial(gym.get_exercise_history, conn),
         "get_exercise_progression": functools.partial(gym.get_exercise_progression, conn),
         "get_next_session_type": functools.partial(gym.get_next_session_type, conn),
         "get_session_plan": functools.partial(gym.get_session_plan, conn),
         "get_weekly_gym_summary": functools.partial(gym.get_weekly_gym_summary, conn),
-        "log_food": functools.partial(meal.log_food, conn),
-        "repeat_meal": functools.partial(meal.repeat_meal, conn),
+        "log_food": functools.partial(meal.log_food, conn, turn_totals=turn_totals),
+        "repeat_meal": functools.partial(meal.repeat_meal, conn, turn_totals=turn_totals),
         "correct_food_log": functools.partial(meal.correct_food_log, conn),
+        "delete_food_log": functools.partial(meal.delete_food_log, conn),
+        "reset_daily_food_log": functools.partial(meal.reset_daily_food_log, conn),
         "set_user_food_macros": functools.partial(meal.set_user_food_macros, conn),
         "get_food_log": functools.partial(meal.get_food_log, conn),
         "get_daily_macros": functools.partial(meal.get_daily_macros, conn),

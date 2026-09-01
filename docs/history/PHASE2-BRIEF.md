@@ -1,5 +1,8 @@
 # Phase 2 brief — recommendation engine
 
+**Status: implemented.** Kept as a historical build spec — see
+`FPL-STATUS.md` for current state.
+
 **Paste-in prompt for Claude Code:**
 > Read `FPL-CONTEXT.md`, `PHASE1-BRIEF.md` (for what already exists) and this file,
 > then implement Phase 2. Build on the Phase 1 modules — `services/fpl_client.py`,
@@ -286,7 +289,8 @@ Replaces the Phase 1 status dump:
 > off a fixed August CSV snapshot — prices and ownership drift, so the same maths
 > legitimately yields a different squad. Second, the actual GW1 squad was **not**
 > the solver's unconstrained output: Haaland, B. Fernandes and three Chelsea assets
-> were forced in by hand (see `GW1-SQUAD.md`). Regressing an unconstrained solve
+> were forced in by hand — a manual override made when the squad was built, not
+> tracked in any separate doc. Regressing an unconstrained solve
 > against a hand-constrained result would fail by design. Test the formula, and
 > test legality. Don't test the squad.
 - [ ] Selling price uses the API's `selling_price`, and a test proves a player bought at £6.0 and now worth £6.3 sells for £6.1

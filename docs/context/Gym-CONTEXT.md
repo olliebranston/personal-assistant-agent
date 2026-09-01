@@ -50,29 +50,30 @@ in `tools/gym.py:_SESSION_PLANS`, not left to the LLM to infer per session):
 
 ### Push — Chest, Shoulders, Triceps
 
-**Compounds first:**
-- Bench press — 5×8 (working weight: ~60–70kg, target: 100kg)
-- Incline dumbbell bench — 4×8
-- Chest press machine — 4×8
-- Dips — 4×10
+**Fixed session order, exactly as `tools/gym.py:_SESSION_PLANS["push"]`
+enforces it (this is what `get_session_plan` actually returns — see the
+note under Exercise Library below for how the wider options here relate
+to it):**
+1. Dips — 4×10
+2. Bench press — 5×8 (working weight: ~60–70kg, target: 100kg)
+3. Overhead press — 4×8
+4. One chest isolation exercise (rotate — pick from the list below) — 4×8
+5. Dumbbell lateral raises — 4×15 ← natural 15+ rep set
+6. Rope pulldowns — 4×8–10
 
-**Shoulders:**
-- Overhead press — 4×8
-- Dumbbell lateral raises — 4×15 ← natural 15+ rep set
-- Cable/machine lateral raises — 3×10 (rotate with DB raises)
-
-**Triceps:**
-- Rope pulldowns — 4×8–10
-- Skullcrushers — 4×8
-- Tricep extension (cable or machine) — 3×10 ← drop set candidate
-
-**Chest isolation (rotate per session, pick 1–2):**
+**Chest isolation rotation (pick 1 for slot 4):**
 - Pec fly machine — 4×8
 - Cable pec fly — 3×10
+- Incline dumbbell bench — 4×8
 - Close-grip dumbbell bench — 4×8
 
-**Ab finishers (2–3 exercises, tack on at end):**
-- Ab crunches, sit-ups, plank, crunches
+**Other options — history/variety, not part of the fixed 6-slot rotation
+above:**
+- Chest press machine
+- Cable/machine lateral raises — 3×10 (rotate with DB raises)
+- Skullcrushers — 4×8
+- Tricep extension (cable or machine) — 3×10 ← drop set candidate
+- Ab finishers (2–3 exercises, tack on at end): ab crunches, sit-ups, plank
 
 ---
 
@@ -186,14 +187,25 @@ Competitive sports count as active recovery, not running training. Don't conflat
 
 **Progressive overload:**
 - This is the most important variable for both strength goals (bench 100kg, squat 150kg)
-- Track: exercise, weight, sets, reps, date — and whether you hit the target
 - The routine is the easy part; the tracking is where the actual gains come from
+- The actual rule Robin applies (`tools/gym.py:_PROGRESSION_CYCLE`/
+  `_PROGRESSION_INCREMENT_KG`): sets×reps advance through a fixed 4-step
+  cycle at a given weight — 3×8 → 3×10 → 4×8 → 4×10. Completing 4×10 bumps
+  the weight by +2.5kg and resets to 3×8 at the new weight. The
+  recommendation is always based on the most advanced (weight, cycle-step)
+  ever logged for an exercise, not just the last session, so one off day
+  doesn't drag the target backwards — see `get_exercise_progression`.
 
 ---
 
 ## Exercise Library (Full List by Muscle)
 
-All exercises logged across training sessions. Rotate within sessions to add variety.
+All exercises logged across training sessions, plus rotation candidates.
+**This is history/variety material, not what `get_session_plan` returns** —
+the tool encodes a fixed 6-exercise rotation per session type
+(`tools/gym.py:_SESSION_PLANS`, per the Push/Pull/Legs sections above); this
+library is the broader set an exercise might be logged under or rotated
+into, not a literal menu the bot picks from live.
 
 ### Chest
 Close grip dumbbell bench, incline dumbbell bench, chest press machine, bench press, cable pec fly, pec fly machine, dips (forward lean), diamond press-ups

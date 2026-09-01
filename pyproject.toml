@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# Explicit, not "whatever ruff's bundled default happens to be this version" —
+# a fresh ruff install pulled in blind-except/datetimez/bandit/pylint-style
+# rules that flag ~150 instances of this codebase's deliberate, consistent
+# conventions (every tool wraps its body in try/except Exception and returns
+# {"error": ...} — see CLAUDE.md/TOOL_CALLING_DESIGN.md) and its long-line
+# docstring style. Pin to the classic pyflakes + pycodestyle error set.
+select = ["E4", "E7", "E9", "F"]

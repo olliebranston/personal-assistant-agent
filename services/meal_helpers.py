@@ -1,18 +1,22 @@
 """Deterministic meal/nutrition helpers shared by bot/scheduler.py and tools/.
 
+Originally agents/meal.py — moved here during the Phase 2 stability-review
+cleanup since agents/ otherwise no longer existed (its per-domain LLM
+routing was removed in the tool-calling migration, commit 71ca68b) and this
+was the one leftover file holding non-LLM helpers instead.
+
 The LLM-routing entry point that used to live here (`handle`, the
 router/parser sub-prompts) was removed — all of that is now handled by the
 tool-calling path in main.py + tools/meal.py. This module keeps only the
-non-LLM helpers that the scheduled jobs and tools/briefing.py still depend
-on directly.
+non-LLM helpers that the scheduled jobs and tools/ still depend on directly.
 """
 
 from __future__ import annotations
 
 import random
 from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
 
+import config
 from data.meals import (
     BREAKFAST_ROTATION as _BREAKFAST_ROTATION,
     LUNCH_ROTATIONS as _LUNCH_ROTATIONS,
@@ -28,7 +32,8 @@ from storage.models import (
     insert_meal_plan,
 )
 
-_TZ = ZoneInfo("Europe/London")
+_TZ = config.TZ
+_WEIGHTS_SESSION_TYPES = ("push", "pull", "legs")
 
 
 def _today() -> date:
@@ -37,6 +42,10 @@ def _today() -> date:
 
 
 # ── Targets ───────────────────────────────────────────────────────────────────
+#
+# Single source of truth for these — tools/meal.py and tools/context.py used
+# to each keep an identical private copy of both the constants and the
+# is-today-a-weights-day check; both now import from here instead.
 
 PROTEIN_TARGET_G = 230
 CALORIE_TARGETS = {
@@ -45,6 +54,20 @@ CALORIE_TARGETS = {
     "default":  3150,
 }
 
+
+def is_weights_day(conn, date_str: str) -> bool:
+    """True if a push/pull/legs session was logged on date_str."""
+    for session in get_recent_sessions(conn, limit=5):
+        if session["date"] == date_str and session["session_type"] in _WEIGHTS_SESSION_TYPES:
+            return True
+    return False
+
+
+def calorie_target_for(conn, date_str: str) -> int:
+    """Return the calorie target for date_str based on whether it's a weights day."""
+    return CALORIE_TARGETS["weights"] if is_weights_day(conn, date_str) else CALORIE_TARGETS["rest"]
+
+
 # ── Daily summary (used by bot/scheduler.py:_end_of_day_summary) ─────────────
 
 
@@ -52,7 +75,7 @@ def _daily_summary(conn) -> str:
     """Return today's macro totals vs target."""
     today = _today().isoformat()
     totals = get_daily_totals(conn, today)
-    cal_target = _get_calorie_target(conn)
+    cal_target = calorie_target_for(conn, today)
     logs = get_food_logs_for_date(conn, today)
 
     protein_gap = PROTEIN_TARGET_G - totals["protein_g"]
@@ -80,16 +103,6 @@ def daily_summary(conn) -> str:
     return _daily_summary(conn)
 
 
-def _get_calorie_target(conn) -> int:
-    """Return today's calorie target based on whether a gym session was logged."""
-    today = _today().isoformat()
-    sessions = get_recent_sessions(conn, limit=5)
-    for s in sessions:
-        if s["date"] == today and s["session_type"] in ("push", "pull", "legs"):
-            return CALORIE_TARGETS["weights"]
-    return CALORIE_TARGETS["rest"]
-
-
 def get_breakfast(weekday: int) -> str:
     return _BREAKFAST_ROTATION.get(weekday, _BREAKFAST_ROTATION[0])
 
@@ -103,11 +116,11 @@ def _format_yesterday_slot_for_prompt(conn, slot: str) -> str | None:
     """Return a compact description of yesterday's logged items for a slot, or None."""
     yesterday = (_today() - timedelta(days=1)).isoformat()
     logs = get_food_logs_for_date(conn, yesterday)
-    items = [l for l in logs if l["meal_slot"] == slot]
+    items = [entry for entry in logs if entry["meal_slot"] == slot]
     if not items:
         return None
-    total_protein = sum(l["protein_g"] for l in items)
-    descriptions = ", ".join(l["description"] for l in items)
+    total_protein = sum(entry["protein_g"] for entry in items)
+    descriptions = ", ".join(entry["description"] for entry in items)
     return f"{descriptions} ({total_protein:.0f}g protein)"
 
 

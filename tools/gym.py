@@ -6,21 +6,24 @@ and returns {"error": "..."} on failure instead of raising.
 
 from __future__ import annotations
 
+import difflib
 import logging
+import re
 import sqlite3
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
-_TZ = ZoneInfo("Europe/London")
-
+import config
 from storage.models import (
     ExerciseSet,
     GymSession,
+    get_distinct_exercise_names,
     get_last_sets_for_exercise,
     get_recent_sessions,
     insert_session,
     insert_set,
 )
+
+_TZ = config.TZ
 
 logger = logging.getLogger(__name__)
 
@@ -43,25 +46,83 @@ def _cycle_rank(sets: int, reps: int) -> int:
     return best
 
 
-# Known shorthand -> the canonical name used in _SESSION_PLANS. Without this,
-# a set logged as "OHP" is invisible to progression/session-plan lookups for
-# "overhead press" (get_last_sets_for_exercise does an exact, case-insensitive
-# match with no alias awareness) — confirmed against real logged data where
-# an "OHP" entry never showed up as history for the "overhead press" slot in
-# get_session_plan. Extend this as more shorthand turns out to need it.
-_EXERCISE_ALIASES: dict[str, str] = {
+# Common shorthand tokens expanded before matching, so a set logged as "OHP"
+# or "incline db bench" matches history logged as "overhead press" or
+# "incline dumbbell bench" — get_last_sets_for_exercise otherwise does an
+# exact, case-insensitive match with no abbreviation awareness. Extend this
+# as more shorthand turns out to need it.
+_TOKEN_ALIASES: dict[str, str] = {
+    "db": "dumbbell",
+    "bb": "barbell",
     "ohp": "overhead press",
+    "rdl": "romanian deadlift",
+    "sldl": "stiff leg deadlift",
+    "bor": "bent over row",
+    "ez": "ez bar",
+    "bw": "bodyweight",
 }
 
+# 0.8 was found to false-positive-match distinct exercises that happen to
+# share most of their words (e.g. "incline dumbbell bench" vs "incline DB
+# curls" scores 0.818) — 0.9 comfortably excludes that (max similarity across
+# all real _SESSION_PLANS exercise pairs is 0.70) while still catching plain
+# typos/pluralisation (e.g. "romanian deadlift" vs "romanian deadlifts" scores
+# 0.971).
+_FUZZY_MATCH_CUTOFF = 0.9
 
-def _exercise_name_candidates(name: str) -> list[str]:
+
+def normalize_exercise_name(name: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace, and expand known
+    shorthand tokens — 'incline db bench' and 'incline dumbbell bench'
+    normalize identically, as do 'OHP' and 'overhead press'."""
+    cleaned = re.sub(r"[^a-z0-9\s]", " ", name.lower())
+    expanded: list[str] = []
+    for token in cleaned.split():
+        expanded.extend(_TOKEN_ALIASES.get(token, token).split())
+    return " ".join(expanded)
+
+
+def _known_exercise_vocabulary(conn: sqlite3.Connection) -> list[str]:
+    """Every exercise name worth matching against: real logged history first
+    (what a lookup actually needs to find), backstopped by the static
+    _SESSION_PLANS names for exercises never yet logged."""
+    plan_names = [ex["exercise"] for plan in _SESSION_PLANS.values() for ex in plan]
+    seen: set[str] = set()
+    vocabulary: list[str] = []
+    for name in [*get_distinct_exercise_names(conn), *plan_names]:
+        key = name.lower()
+        if key not in seen:
+            seen.add(key)
+            vocabulary.append(name)
+    return vocabulary
+
+
+def _resolve_canonical_exercise(conn: sqlite3.Connection, name: str) -> str | None:
+    """Find the literal, already-known exercise name (as actually logged or
+    planned) that name most likely refers to — via normalized-form exact
+    match first, then a conservative fuzzy match. Returns None if nothing
+    resolves confidently (caller still tries the raw name as a fallback)."""
+    target = normalize_exercise_name(name)
+    normalized_map: dict[str, str] = {}
+    for candidate in _known_exercise_vocabulary(conn):
+        normalized_map.setdefault(normalize_exercise_name(candidate), candidate)
+
+    if target in normalized_map:
+        return normalized_map[target]
+
+    close = difflib.get_close_matches(target, list(normalized_map.keys()), n=1, cutoff=_FUZZY_MATCH_CUTOFF)
+    return normalized_map[close[0]] if close else None
+
+
+def _exercise_name_candidates(conn: sqlite3.Connection, name: str) -> list[str]:
     """All names that should be treated as the same exercise for history
-    lookups: the given name, its canonical form, and any other alias that
-    maps to the same canonical form — so a lookup for either the shorthand
-    or the full name finds sets logged under either."""
-    canonical = _EXERCISE_ALIASES.get(name.strip().lower(), name)
-    candidates = {name, canonical}
-    candidates.update(alias for alias, canon in _EXERCISE_ALIASES.items() if canon == canonical)
+    lookups: the given name, plus its resolved canonical form (if any) —
+    so a lookup for a shorthand/abbreviation finds sets logged under the
+    full name and vice versa."""
+    candidates = {name}
+    canonical = _resolve_canonical_exercise(conn, name)
+    if canonical:
+        candidates.add(canonical)
     return list(candidates)
 
 
@@ -69,7 +130,7 @@ def _get_history_across_aliases(conn: sqlite3.Connection, exercise_name: str, li
     """get_last_sets_for_exercise, but merged across all known aliases of exercise_name."""
     seen_ids: set[int] = set()
     merged: list[dict] = []
-    for candidate in _exercise_name_candidates(exercise_name):
+    for candidate in _exercise_name_candidates(conn, exercise_name):
         for row in get_last_sets_for_exercise(conn, candidate, limit=limit):
             if row["id"] not in seen_ids:
                 seen_ids.add(row["id"])
@@ -131,17 +192,32 @@ def _next_session_type(conn: sqlite3.Connection) -> str:
     return "push"
 
 
-async def log_exercise(
+async def log_exercises(
     conn: sqlite3.Connection,
-    exercise_name: str,
-    sets: int,
-    reps: int,
-    weight_kg: float | None = None,
-    notes: str | None = None,
+    exercises: list[dict],
     session_type: str | None = None,
 ) -> dict:
-    """Log one exercise, appending to today's session or creating a new one (§3.2d)."""
+    """Log one or more exercises to today's session in a single atomic call
+    (§3.2d), appending to it or creating a new one.
+
+    Takes every exercise from the user's message as a list — even a single
+    exercise is a 1-item list — so a multi-exercise message can't silently
+    lose an item to the model choosing to call this fewer times than there
+    were exercises (the previous one-exercise-per-call design's failure mode).
+    """
     try:
+        if not exercises:
+            return {"error": "exercises list is empty"}
+
+        # Validate every item before writing any of them — insert_set commits
+        # per row, so without this an item failing partway through the list
+        # would leave earlier items durably logged while the call as a whole
+        # reports an error, breaking the "single atomic call" guarantee.
+        for i, item in enumerate(exercises):
+            missing = [k for k in ("exercise_name", "sets", "reps") if k not in item]
+            if missing:
+                return {"error": f"exercises[{i}] is missing required field(s): {', '.join(missing)}"}
+
         today = datetime.now(tz=_TZ).date().isoformat()
 
         # Query directly for today's date — any session_type is fine, always append
@@ -157,27 +233,40 @@ async def log_exercise(
             resolved_type = session_type or _next_session_type(conn)
             session_id = insert_session(conn, GymSession(date=today, session_type=resolved_type))
 
-        insert_set(conn, ExerciseSet(
-            session_id=session_id,
-            exercise=exercise_name,
-            weight_kg=weight_kg,
-            sets=sets,
-            reps=reps,
-            notes=notes or "",
-        ))
+        logged = []
+        for item in exercises:
+            exercise_name = item["exercise_name"]
+            sets = item["sets"]
+            reps = item["reps"]
+            weight_kg = item.get("weight_kg")
+            warmup_kg = item.get("warmup_kg")
+            notes = item.get("notes")
+            insert_set(conn, ExerciseSet(
+                session_id=session_id,
+                exercise=exercise_name,
+                weight_kg=weight_kg,
+                warmup_kg=warmup_kg,
+                sets=sets,
+                reps=reps,
+                notes=notes or "",
+            ))
+            logged.append({
+                "exercise": exercise_name,
+                "sets": sets,
+                "reps": reps,
+                "weight_kg": weight_kg,
+                "warmup_kg": warmup_kg,
+                "notes": notes,
+            })
 
         return {
             "logged": True,
             "session_id": session_id,
             "session_type": resolved_type,
-            "exercise": exercise_name,
-            "sets": sets,
-            "reps": reps,
-            "weight_kg": weight_kg,
-            "notes": notes,
+            "exercises": logged,
         }
     except Exception as exc:
-        logger.warning("log_exercise failed: %s", exc)
+        logger.warning("log_exercises failed: %s", exc)
         return {"error": str(exc)}
 
 
@@ -367,49 +456,69 @@ TOOL_SCHEMAS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "log_exercise",
+            "name": "log_exercises",
             "description": (
-                "Log one completed exercise to today's gym session. Call this once per "
-                "exercise mentioned in the user's message — e.g. for 'bench 80kg 5x5, OHP "
-                "52.5kg 4x8' call this twice, once per movement. Automatically appends to "
-                "today's open session if one exists (see open_session_today in the ambient "
-                "context), or starts a new session."
+                "Log one or more completed exercises to today's gym session in a SINGLE "
+                "call. Always pass every exercise mentioned in the user's message as one "
+                "list — even a single exercise is a 1-item list. E.g. for 'bench 80kg 5x5, "
+                "OHP s40 52.5kg 4x8' pass two items in one call — never split a "
+                "multi-exercise message into separate calls, that silently drops "
+                "exercises. Automatically appends to today's open session if one exists "
+                "(see open_session_today in the ambient context), or starts a new one."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "exercise_name": {
-                        "type": "string",
-                        "description": "Name of the exercise, e.g. 'bench press', 'rope pulldowns', '5k run'.",
-                    },
-                    "sets": {
-                        "type": "integer",
-                        "description": "Number of sets performed.",
-                    },
-                    "reps": {
-                        "type": "integer",
-                        "description": "Reps per set (or total reps for single-set entries like a run).",
-                    },
-                    "weight_kg": {
-                        "type": ["number", "null"],
-                        "description": "Working weight in kg. Use null for bodyweight exercises or runs.",
-                    },
-                    "notes": {
-                        "type": ["string", "null"],
-                        "description": "Form cues, 'failed last rep', pace/time for runs, or any other free note.",
+                    "exercises": {
+                        "type": "array",
+                        "description": "Every exercise from this message, one item each, in the order performed.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "exercise_name": {
+                                    "type": "string",
+                                    "description": "Name of the exercise, e.g. 'bench press', 'rope pulldowns', '5k run'.",
+                                },
+                                "sets": {
+                                    "type": "integer",
+                                    "description": "Number of working sets performed.",
+                                },
+                                "reps": {
+                                    "type": "integer",
+                                    "description": "Reps per set (or total reps for single-set entries like a run).",
+                                },
+                                "weight_kg": {
+                                    "type": ["number", "null"],
+                                    "description": "Working weight in kg. Use null for bodyweight exercises or runs.",
+                                },
+                                "warmup_kg": {
+                                    "type": ["number", "null"],
+                                    "description": (
+                                        "Warm-up weight, only if Ollie noted one — 'sXX' or "
+                                        "'warm-up set of Xkg' notation, e.g. 's40 70kg 5x8' means "
+                                        "warmup_kg=40, weight_kg=70. Null if no warm-up was mentioned."
+                                    ),
+                                },
+                                "notes": {
+                                    "type": ["string", "null"],
+                                    "description": "Form cues, 'failed last rep', pace/time for runs, or any other free note.",
+                                },
+                            },
+                            "required": ["exercise_name", "sets", "reps"],
+                        },
                     },
                     "session_type": {
                         "type": ["string", "null"],
                         "enum": ["push", "pull", "legs", "short", "run", None],
                         "description": (
                             "Only set this when starting a brand-new session today and the type "
-                            "isn't already clear from ambient context. Infer from the exercise: "
+                            "isn't already clear from ambient context. Infer from the exercises: "
                             "bench/OHP/dips/flyes -> push; rows/pull-ups/curls/face pulls -> pull; "
                             "squats/RDLs/lunges/leg press -> legs."
                         ),
                     },
                 },
-                "required": ["exercise_name", "sets", "reps"],
+                "required": ["exercises"],
             },
         },
     },

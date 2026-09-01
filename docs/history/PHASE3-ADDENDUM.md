@@ -1,5 +1,8 @@
 # Phase 3 addendum — real data, known-answer tests, and one extra feature
 
+**Status: implemented** — the fixtures and tests described below exist
+(`tests/fixtures/rivals_gw2.py`, `tests/test_no_production_import_of_fixtures.py`).
+
 Append to `PHASE3-BRIEF.md`. Everything below is **real data pulled from the live
 API on 1 Sept 2026**, after GW2. Use it as checked-in test fixtures so Phase 3 is
 verified against ground truth rather than synthetic squads.
