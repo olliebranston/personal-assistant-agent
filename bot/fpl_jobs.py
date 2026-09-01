@@ -56,6 +56,29 @@ _TICK_INTERVAL_SEC = 300
 _CHIP_NAMES = {"wildcard": "Wildcard", "freehit": "Free Hit", "3xc": "Triple Captain", "bboost": "Bench Boost"}
 
 
+def main_briefing_trigger(deadline_utc: datetime.datetime) -> datetime.datetime:
+    """PHASE3-BRIEF.md Step 3: the later of (a) 18:00 on the Thursday before the
+    deadline (Europe/London), or (b) T-48h — but never later than T-20h.
+
+    Ollie picks his team the day before the deadline (typically Thursday) to
+    catch late injury news. Pure deadline-relative T-24h put the main briefing
+    at an arbitrary hour for non-Friday deadlines (Saturday 11:00 -> Friday
+    11:00, mid-workday and easy to miss). This anchors weekend deadlines to a
+    consistent Thursday-evening slot while still degrading sensibly for
+    midweek rounds, where T-48h ends up the binding constraint instead of
+    reaching back to the *previous* week's Thursday.
+    """
+    deadline_london = deadline_utc.astimezone(_TZ)
+    days_since_thursday = (deadline_london.weekday() - 3) % 7  # Mon=0 ... Thu=3 ... Sun=6
+    thursday_date = (deadline_london - datetime.timedelta(days=days_since_thursday)).date()
+    thursday_1800 = datetime.datetime.combine(thursday_date, datetime.time(18, 0), tzinfo=_TZ)
+
+    t48 = deadline_london - datetime.timedelta(hours=48)
+    t20 = deadline_london - datetime.timedelta(hours=20)
+    trigger = min(max(thursday_1800, t48), t20)
+    return trigger.astimezone(datetime.timezone.utc)
+
+
 def _squad_table(squad: list[dict]) -> str:
     lines = []
     for p in squad:
@@ -415,7 +438,7 @@ async def _fpl_tick(context) -> None:
             return  # deadline passed — _sync_passed_deadlines handles it above
 
         gw = tgw["gw"]
-        if delta_hours <= 24 and not was_notification_sent(conn, gw, "T24"):
+        if now_utc() >= main_briefing_trigger(deadline) and not was_notification_sent(conn, gw, "T24"):
             await _send_t24(context, conn)
             mark_notification_sent(conn, gw, "T24", now_utc().isoformat())
 

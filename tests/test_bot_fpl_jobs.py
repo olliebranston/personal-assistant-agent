@@ -9,7 +9,7 @@ fake deadline_utc — do not wait a week to find out it's broken").
 from __future__ import annotations
 
 import sqlite3
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -132,6 +132,47 @@ def _wired(monkeypatch):
     return conn, state
 
 
+# ── Step 3: main briefing trigger (Thursday-evening anchor) ────────────────
+#
+# PHASE3-BRIEF.md Step 3: the later of (a) 18:00 the Thursday before the
+# deadline, or (b) T-48h — capped at T-20h. Fixed, hand-picked deadlines
+# (not "now"-relative) so these are deterministic regardless of which day
+# the suite actually runs on.
+
+
+def test_main_briefing_trigger_friday_deadline_anchors_to_thursday_evening():
+    # Fri 4 Sep 2026, 18:30 BST -> Thu 3 Sep, 18:00 BST (17:00 UTC, BST = UTC+1)
+    deadline = datetime(2026, 9, 4, 17, 30, tzinfo=timezone.utc)
+    trigger = fpl_jobs.main_briefing_trigger(deadline)
+    assert trigger == datetime(2026, 9, 3, 17, 0, tzinfo=timezone.utc)
+
+
+def test_main_briefing_trigger_saturday_deadline_fires_thursday_not_friday():
+    # PHASE3-BRIEF.md's own acceptance case: Sat 11:00 deadline must fire
+    # Thursday evening, not Friday morning (mid-workday, easy to miss).
+    deadline = datetime(2026, 9, 5, 10, 0, tzinfo=timezone.utc)  # Sat 5 Sep, 11:00 BST
+    trigger = fpl_jobs.main_briefing_trigger(deadline)
+    assert trigger == datetime(2026, 9, 3, 17, 0, tzinfo=timezone.utc)  # Thu 3 Sep 18:00 BST
+    assert trigger.astimezone(fpl_jobs._TZ).date().isoformat() == "2026-09-03"
+
+
+def test_main_briefing_trigger_midweek_deadline_falls_back_to_t48h():
+    # Tue deadline: the "Thursday before" is the previous week's Thursday —
+    # far more than 48h out — so T-48h becomes the binding constraint
+    # instead of reaching back across the weekend.
+    deadline = datetime(2026, 9, 8, 17, 30, tzinfo=timezone.utc)  # Tue 8 Sep, 18:30 BST
+    trigger = fpl_jobs.main_briefing_trigger(deadline)
+    assert trigger == deadline - timedelta(hours=48)
+
+
+def test_main_briefing_trigger_thursday_deadline_capped_at_t20h():
+    # A deadline that falls ON Thursday: the naive Thursday-18:00 anchor
+    # would be only 30 minutes before deadline, so T-20h caps it instead.
+    deadline = datetime(2026, 9, 3, 17, 30, tzinfo=timezone.utc)  # Thu 3 Sep, 18:30 BST
+    trigger = fpl_jobs.main_briefing_trigger(deadline)
+    assert trigger == deadline - timedelta(hours=20)
+
+
 # ── T-24h dedup ──────────────────────────────────────────────────────────────
 
 
@@ -153,8 +194,13 @@ async def test_t24_fires_once_even_when_tick_runs_twice(_wired):
 
 @pytest.mark.asyncio
 async def test_no_ladder_message_sent_before_t24_window(_wired):
+    # 14 days is deliberately generous, not 48h: under Step 3's rule T-48h is
+    # itself a valid trigger point (the later of the Thursday anchor or
+    # T-48h), so a deadline exactly 48h out is sometimes already due. 14 days
+    # keeps this test's "too early" premise true regardless of which weekday
+    # it happens to run on.
     conn, state = _wired
-    deadline = _iso(fpl_jobs.now_utc() + timedelta(hours=48))
+    deadline = _iso(fpl_jobs.now_utc() + timedelta(days=14))
     state["bootstrap"] = _bootstrap(deadline)
 
     bot = _FakeBot()
