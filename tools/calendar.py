@@ -40,13 +40,15 @@ async def get_calendar_events(conn: sqlite3.Connection, time_min: str, time_max:
     }
 
 
-async def get_today_calendar_summary(conn: sqlite3.Connection) -> list[dict]:
+async def get_today_calendar_summary(conn: sqlite3.Connection, caller: str = "") -> list[dict]:
     """Return today's events as compact {summary, start_time, location} dicts.
 
     Shared by tools/news.py and tools/briefing.py, which both used to compute
     today's [00:00, 23:59] window and reshape the result identically. Never
     raises — returns [] on any failure, matching what both callers already
-    did with their own copies of this logic.
+    did with their own copies of this logic. Pass `caller` (e.g. "get_news")
+    so a failure log line still identifies which caller hit it, the way each
+    caller's own log message used to before this was deduplicated.
     """
     now = datetime.now(tz=config.TZ)
     time_min = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
@@ -55,7 +57,7 @@ async def get_today_calendar_summary(conn: sqlite3.Connection) -> list[dict]:
     try:
         result = await get_calendar_events(conn, time_min=time_min, time_max=time_max)
     except Exception as exc:
-        logger.warning("get_today_calendar_summary failed: %s", exc)
+        logger.warning("get_today_calendar_summary (%s) failed: %s", caller or "unknown caller", exc)
         return []
 
     if "error" in result:

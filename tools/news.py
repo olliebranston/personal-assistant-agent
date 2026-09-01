@@ -82,7 +82,7 @@ async def get_news(conn: sqlite3.Connection) -> dict:
         "chelsea": _format_chelsea(chelsea_items),
         "world": _format_world(world_items),
         "horses": _format_horses(horse_map),
-        "today_calendar": await get_today_calendar_summary(conn),
+        "today_calendar": await get_today_calendar_summary(conn, caller="get_news"),
     }
 
 

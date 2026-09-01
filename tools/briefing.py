@@ -47,7 +47,7 @@ async def get_morning_briefing_data(conn: sqlite3.Connection) -> dict:
     yesterday = (today - timedelta(days=1)).isoformat()
 
     # ── Calendar (today) ──────────────────────────────────────────────────────
-    calendar_today = await get_today_calendar_summary(conn)
+    calendar_today = await get_today_calendar_summary(conn, caller="get_morning_briefing_data")
 
     # ── News bundle (world + chelsea + horses) ────────────────────────────────
     world_headlines: list[dict] = []

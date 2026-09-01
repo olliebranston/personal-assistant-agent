@@ -676,7 +676,6 @@ def get_my_history(conn: sqlite3.Connection, gw: int) -> dict | None:
     return dict(row) if row else None
 
 
-
 # ---------------------------------------------------------------------------
 # Mini-league rivals — PHASE3-BRIEF.md Step 4 / PHASE3-ADDENDUM.md §0.
 #
