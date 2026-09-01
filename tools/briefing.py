@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta
 
 import config
 from services.meal_helpers import CALORIE_TARGETS, PROTEIN_TARGET_G
-from tools.calendar import get_calendar_events
+from tools.calendar import get_today_calendar_summary
 from tools.gym import get_last_session, get_next_session_type
 from tools.meal import get_daily_macros
 from tools.news import get_news
@@ -46,20 +46,8 @@ async def get_morning_briefing_data(conn: sqlite3.Connection) -> dict:
     today = now.date()
     yesterday = (today - timedelta(days=1)).isoformat()
 
-    time_min = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    time_max = now.replace(hour=23, minute=59, second=0, microsecond=0).isoformat()
-
     # ── Calendar (today) ──────────────────────────────────────────────────────
-    calendar_today: list[dict] = []
-    try:
-        cal_result = await get_calendar_events(conn, time_min=time_min, time_max=time_max)
-        if "error" not in cal_result:
-            calendar_today = [
-                {"summary": ev["summary"], "start_time": ev["start"], "location": ev["location"]}
-                for ev in cal_result.get("events", [])
-            ]
-    except Exception as exc:
-        logger.warning("get_morning_briefing_data: calendar failed: %s", exc)
+    calendar_today = await get_today_calendar_summary(conn)
 
     # ── News bundle (world + chelsea + horses) ────────────────────────────────
     world_headlines: list[dict] = []

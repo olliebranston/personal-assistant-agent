@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tools.calendar import create_calendar_event, get_calendar_events
+from tools.calendar import create_calendar_event, get_calendar_events, get_today_calendar_summary
 
 
 def _mock_service_for_list(calendar_items: list[dict], event_items: list[dict]) -> MagicMock:
@@ -108,6 +108,54 @@ async def test_get_calendar_events_returns_error_on_auth_failure(monkeypatch):
     )
 
     assert result == {"error": "calendar_unavailable"}
+
+
+# ── get_today_calendar_summary ──────────────────────────────────────────────
+# Shared by tools/news.py and tools/briefing.py — previously each had its own
+# identical copy of this "today's window + reshape events" logic.
+
+
+@pytest.mark.asyncio
+async def test_get_today_calendar_summary_returns_compact_shape(monkeypatch):
+    service = _mock_service_for_list(
+        calendar_items=[{"id": "primary", "summary": "Ollie"}],
+        event_items=[
+            {
+                "summary": "Gym",
+                "start": {"dateTime": "2026-06-16T18:00:00+01:00"},
+                "end": {"dateTime": "2026-06-16T19:00:00+01:00"},
+                "location": None,
+            }
+        ],
+    )
+    monkeypatch.setattr("tools.calendar.get_service", lambda: service)
+
+    result = await get_today_calendar_summary(conn=None)
+
+    assert result == [
+        {"summary": "Gym", "start_time": "2026-06-16T18:00:00+01:00", "location": None}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_get_today_calendar_summary_empty_on_error(monkeypatch):
+    monkeypatch.setattr("tools.calendar.get_service", lambda: (_ for _ in ()).throw(FileNotFoundError()))
+
+    result = await get_today_calendar_summary(conn=None)
+
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_get_today_calendar_summary_empty_on_unexpected_exception(monkeypatch):
+    async def _raise(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("tools.calendar.get_calendar_events", _raise)
+
+    result = await get_today_calendar_summary(conn=None)
+
+    assert result == []
 
 
 # ── create_calendar_event ─────────────────────────────────────────────────────

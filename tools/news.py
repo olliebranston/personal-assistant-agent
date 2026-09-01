@@ -11,15 +11,11 @@ import asyncio
 import logging
 import sqlite3
 import time
-from datetime import datetime
 
-import config
 from services import news as news_svc
-from tools.calendar import get_calendar_events
+from tools.calendar import get_today_calendar_summary
 
 logger = logging.getLogger(__name__)
-
-_TZ = config.TZ
 
 
 async def _safe_fetch(coro, default, name: str):
@@ -74,26 +70,6 @@ def _format_horses(horse_map: dict[str, list[dict]]) -> dict:
     return {"rate_limited": False, "entries": entries}
 
 
-async def _get_today_calendar(conn: sqlite3.Connection) -> list[dict]:
-    now = datetime.now(tz=_TZ)
-    time_min = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    time_max = now.replace(hour=23, minute=59, second=0, microsecond=0).isoformat()
-
-    try:
-        result = await get_calendar_events(conn, time_min=time_min, time_max=time_max)
-    except Exception as exc:
-        logger.warning("get_news: calendar fetch failed: %s", exc)
-        return []
-
-    if "error" in result:
-        return []
-
-    return [
-        {"summary": ev["summary"], "start_time": ev["start"], "location": ev["location"]}
-        for ev in result["events"]
-    ]
-
-
 async def get_news(conn: sqlite3.Connection) -> dict:
     """Chelsea FC news, world headlines, racing entries for Ollie's horses, and today's calendar."""
     chelsea_items, world_items, horse_map = await asyncio.gather(
@@ -106,7 +82,7 @@ async def get_news(conn: sqlite3.Connection) -> dict:
         "chelsea": _format_chelsea(chelsea_items),
         "world": _format_world(world_items),
         "horses": _format_horses(horse_map),
-        "today_calendar": await _get_today_calendar(conn),
+        "today_calendar": await get_today_calendar_summary(conn),
     }
 
 

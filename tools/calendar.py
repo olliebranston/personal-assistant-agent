@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from datetime import datetime
 
+import config
 from services.google_calendar import create_event, get_service, list_events
 
 logger = logging.getLogger(__name__)
@@ -36,6 +38,33 @@ async def get_calendar_events(conn: sqlite3.Connection, time_min: str, time_max:
             for ev in events
         ]
     }
+
+
+async def get_today_calendar_summary(conn: sqlite3.Connection) -> list[dict]:
+    """Return today's events as compact {summary, start_time, location} dicts.
+
+    Shared by tools/news.py and tools/briefing.py, which both used to compute
+    today's [00:00, 23:59] window and reshape the result identically. Never
+    raises — returns [] on any failure, matching what both callers already
+    did with their own copies of this logic.
+    """
+    now = datetime.now(tz=config.TZ)
+    time_min = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    time_max = now.replace(hour=23, minute=59, second=0, microsecond=0).isoformat()
+
+    try:
+        result = await get_calendar_events(conn, time_min=time_min, time_max=time_max)
+    except Exception as exc:
+        logger.warning("get_today_calendar_summary failed: %s", exc)
+        return []
+
+    if "error" in result:
+        return []
+
+    return [
+        {"summary": ev["summary"], "start_time": ev["start"], "location": ev["location"]}
+        for ev in result["events"]
+    ]
 
 
 async def create_calendar_event(

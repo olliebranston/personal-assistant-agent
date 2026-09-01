@@ -10,6 +10,7 @@ import time
 
 import pytest
 
+import tools.calendar as calendar_tools
 import tools.news as news_tools
 from tools.news import get_news
 
@@ -70,7 +71,7 @@ async def test_chelsea_rss_failure_returns_empty_list_without_failing_tool(monke
     monkeypatch.setattr(news_tools.news_svc, "fetch_chelsea_items", _async_raise(RuntimeError("RSS down")))
     monkeypatch.setattr(news_tools.news_svc, "fetch_world_news_items", _async_return(world_items))
     monkeypatch.setattr(news_tools.news_svc, "fetch_all_horse_items", _async_return(horse_map))
-    monkeypatch.setattr(news_tools, "get_calendar_events", _async_return(calendar_events))
+    monkeypatch.setattr(calendar_tools, "get_calendar_events", _async_return(calendar_events))
 
     result = await get_news(conn=None)
 
@@ -106,7 +107,7 @@ async def test_horse_entries_include_formatted_distance(monkeypatch):
     monkeypatch.setattr(news_tools.news_svc, "fetch_chelsea_items", _async_return([]))
     monkeypatch.setattr(news_tools.news_svc, "fetch_world_news_items", _async_return([]))
     monkeypatch.setattr(news_tools.news_svc, "fetch_all_horse_items", _async_return(horse_map))
-    monkeypatch.setattr(news_tools, "get_calendar_events", _async_return({"error": "calendar_unavailable"}))
+    monkeypatch.setattr(calendar_tools, "get_calendar_events", _async_return({"error": "calendar_unavailable"}))
 
     result = await get_news(conn=None)
 
@@ -128,7 +129,7 @@ async def test_today_calendar_empty_when_calendar_unavailable(monkeypatch):
     monkeypatch.setattr(news_tools.news_svc, "fetch_chelsea_items", _async_return([]))
     monkeypatch.setattr(news_tools.news_svc, "fetch_world_news_items", _async_return([]))
     monkeypatch.setattr(news_tools.news_svc, "fetch_all_horse_items", _async_return({}))
-    monkeypatch.setattr(news_tools, "get_calendar_events", _async_return({"error": "calendar_unavailable"}))
+    monkeypatch.setattr(calendar_tools, "get_calendar_events", _async_return({"error": "calendar_unavailable"}))
 
     result = await get_news(conn=None)
 
@@ -149,7 +150,7 @@ async def test_published_minutes_ago_calculated_relative_to_now(monkeypatch):
     monkeypatch.setattr(news_tools.news_svc, "fetch_chelsea_items", _async_return(chelsea_items))
     monkeypatch.setattr(news_tools.news_svc, "fetch_world_news_items", _async_return([]))
     monkeypatch.setattr(news_tools.news_svc, "fetch_all_horse_items", _async_return({}))
-    monkeypatch.setattr(news_tools, "get_calendar_events", _async_return({"error": "calendar_unavailable"}))
+    monkeypatch.setattr(calendar_tools, "get_calendar_events", _async_return({"error": "calendar_unavailable"}))
 
     result = await get_news(conn=None)
 
