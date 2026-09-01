@@ -11,9 +11,10 @@ The important part is the MILP: every squad it emits is guaranteed valid
 (budget, 2/5/5/3, max 3 per club, legal formation). That is the "hallucination
 firewall" — the LLM never picks players, the solver does.
 
-Usage:
-    python3 fpl_squad_v0.py                       # unconstrained optimum
-    python3 fpl_squad_v0.py --force Haaland Palmer --min-club CHE=2
+Usage (from the repo root — reads teams.csv/fixtures.csv/players_raw.csv
+from the current working directory, not this file's location):
+    python3 services/fpl_squad_v0.py                       # unconstrained optimum
+    python3 services/fpl_squad_v0.py --force Haaland Palmer --min-club CHE=2
 """
 import argparse
 import collections
