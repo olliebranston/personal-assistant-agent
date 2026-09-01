@@ -113,6 +113,17 @@ def get_last_sets_for_exercise(
     return [dict(r) for r in rows]
 
 
+def get_distinct_exercise_names(conn: sqlite3.Connection) -> list[str]:
+    """Return every distinct exercise name ever logged, exactly as stored.
+
+    Used to build a name-matching vocabulary for exercise-name normalization
+    (tools/gym.py) — real logged history takes priority over the static
+    session-plan vocabulary since it's what a lookup actually needs to match.
+    """
+    rows = conn.execute("SELECT DISTINCT exercise FROM exercise_sets").fetchall()
+    return [r["exercise"] for r in rows]
+
+
 def get_recent_sessions(
     conn: sqlite3.Connection,
     limit: int = 10,

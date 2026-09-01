@@ -23,7 +23,8 @@ from tools.gym import (
     get_next_session_type,
     get_session_plan,
     get_weekly_gym_summary,
-    log_exercise,
+    log_exercises,
+    normalize_exercise_name,
 )
 
 
@@ -37,18 +38,20 @@ def _make_conn() -> sqlite3.Connection:
     return conn
 
 
-# ── log_exercise ─────────────────────────────────────────────────────────────
+# ── log_exercises ────────────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_log_exercise_creates_session_when_none_today():
+async def test_log_exercises_creates_session_when_none_today():
     conn = _make_conn()
 
-    result = await log_exercise(conn, exercise_name="bench press", sets=5, reps=5, weight_kg=80.0)
+    result = await log_exercises(conn, exercises=[
+        {"exercise_name": "bench press", "sets": 5, "reps": 5, "weight_kg": 80.0},
+    ])
 
     assert result["logged"] is True
     assert result["session_type"] == "push"  # default fallback with no history
-    assert result["exercise"] == "bench press"
+    assert result["exercises"][0]["exercise"] == "bench press"
 
     sessions = get_recent_sessions(conn)
     assert len(sessions) == 1
@@ -57,12 +60,14 @@ async def test_log_exercise_creates_session_when_none_today():
 
 
 @pytest.mark.asyncio
-async def test_log_exercise_appends_to_existing_session_today():
+async def test_log_exercises_appends_to_existing_session_today():
     conn = _make_conn()
     today = date.today().isoformat()
     session_id = insert_session(conn, GymSession(date=today, session_type="push"))
 
-    result = await log_exercise(conn, exercise_name="overhead press", sets=4, reps=8, weight_kg=52.5)
+    result = await log_exercises(conn, exercises=[
+        {"exercise_name": "overhead press", "sets": 4, "reps": 8, "weight_kg": 52.5},
+    ])
 
     assert result["logged"] is True
     assert result["session_id"] == session_id
@@ -71,6 +76,66 @@ async def test_log_exercise_appends_to_existing_session_today():
     sessions = get_recent_sessions(conn)
     assert len(sessions) == 1  # appended, not a new session
     assert len(sessions[0]["sets"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_log_exercises_inserts_all_items_from_one_call():
+    # Regression test: multi-exercise messages used to rely on the model
+    # self-issuing one tool call per exercise, and a second exercise could
+    # silently never get logged. A single atomic call must insert every item.
+    conn = _make_conn()
+
+    result = await log_exercises(conn, exercises=[
+        {"exercise_name": "bench press", "sets": 5, "reps": 5, "weight_kg": 80.0},
+        {"exercise_name": "overhead press", "sets": 4, "reps": 8, "weight_kg": 52.5},
+    ])
+
+    assert result["logged"] is True
+    assert {e["exercise"] for e in result["exercises"]} == {"bench press", "overhead press"}
+
+    sessions = get_recent_sessions(conn)
+    assert len(sessions) == 1
+    assert len(sessions[0]["sets"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_log_exercises_creates_exactly_one_session_for_multiple_items():
+    conn = _make_conn()
+
+    await log_exercises(conn, exercises=[
+        {"exercise_name": "bench press", "sets": 5, "reps": 5, "weight_kg": 80.0},
+        {"exercise_name": "overhead press", "sets": 4, "reps": 8, "weight_kg": 52.5},
+        {"exercise_name": "dips", "sets": 4, "reps": 10, "weight_kg": None},
+    ])
+
+    sessions = get_recent_sessions(conn)
+    assert len(sessions) == 1
+    assert len(sessions[0]["sets"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_log_exercises_captures_warmup_kg():
+    # warmup_kg was silently dropped when logging moved off the old
+    # single-shot parser — the DB column/dataclass field always supported it,
+    # only the tool interface had stopped exposing it.
+    conn = _make_conn()
+
+    result = await log_exercises(conn, exercises=[
+        {"exercise_name": "bench press", "sets": 5, "reps": 8, "weight_kg": 70.0, "warmup_kg": 40.0},
+    ])
+
+    assert result["exercises"][0]["warmup_kg"] == 40.0
+    sessions = get_recent_sessions(conn)
+    assert sessions[0]["sets"][0]["warmup_kg"] == 40.0
+
+
+@pytest.mark.asyncio
+async def test_log_exercises_empty_list_errors():
+    conn = _make_conn()
+
+    result = await log_exercises(conn, exercises=[])
+
+    assert "error" in result
 
 
 # ── get_last_session ─────────────────────────────────────────────────────────
@@ -232,6 +297,50 @@ async def test_exercise_history_finds_sets_logged_under_a_known_alias():
 
     assert len(result["entries"]) == 1
     assert result["entries"][0]["weight_kg"] == 52.5
+
+
+# ── normalize_exercise_name / exercise-name matching ────────────────────────
+
+
+def test_normalize_exercise_name_expands_known_abbreviations():
+    assert normalize_exercise_name("incline db bench") == normalize_exercise_name("incline dumbbell bench")
+    assert normalize_exercise_name("OHP") == normalize_exercise_name("overhead press")
+    assert normalize_exercise_name("rdl") == normalize_exercise_name("romanian deadlift")
+
+
+def test_normalize_exercise_name_strips_punctuation_and_case():
+    assert normalize_exercise_name("Bench-Press!") == normalize_exercise_name("bench press")
+
+
+@pytest.mark.asyncio
+async def test_get_exercise_progression_matches_across_db_abbreviation():
+    # Reproduces the reported bug directly: a session logged as "incline
+    # dumbbell bench" was invisible to progression lookups made as "incline
+    # db bench" — get_last_sets_for_exercise did an exact string match with
+    # no abbreviation awareness, so progressive-overload silently fell back
+    # to a static, weight-less plan for what is really the same exercise.
+    conn = _make_conn()
+    s1 = insert_session(conn, GymSession(date="2026-06-15", session_type="push"))
+    insert_set(conn, ExerciseSet(session_id=s1, exercise="incline dumbbell bench", sets=4, reps=8, weight_kg=32.5))
+
+    result = await get_exercise_progression(conn, exercise_name="incline db bench")
+
+    assert result["found"] is True
+    assert result["basis"]["weight_kg"] == 32.5
+
+
+@pytest.mark.asyncio
+async def test_get_exercise_progression_does_not_cross_match_unrelated_exercises():
+    # Guard against the fuzzy-matching fallback overreaching — "bench press"
+    # and "leg press" are different exercises and must not be conflated just
+    # because they share a word.
+    conn = _make_conn()
+    s1 = insert_session(conn, GymSession(date="2026-06-15", session_type="legs"))
+    insert_set(conn, ExerciseSet(session_id=s1, exercise="leg press", sets=4, reps=8, weight_kg=120.0))
+
+    result = await get_exercise_progression(conn, exercise_name="bench press")
+
+    assert result["found"] is False
 
 
 # ── get_next_session_type ────────────────────────────────────────────────────

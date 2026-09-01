@@ -67,7 +67,7 @@ def build_tool_registry(
     turn_totals: dict[str, float] = {"protein_g": 0.0, "kcal": 0.0}
 
     dispatch: dict[str, ToolFunc] = {
-        "log_exercise": functools.partial(gym.log_exercise, conn),
+        "log_exercises": functools.partial(gym.log_exercises, conn),
         "get_last_session": functools.partial(gym.get_last_session, conn),
         "get_exercise_history": functools.partial(gym.get_exercise_history, conn),
         "get_exercise_progression": functools.partial(gym.get_exercise_progression, conn),
