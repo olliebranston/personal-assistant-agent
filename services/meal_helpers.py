@@ -33,7 +33,7 @@ from storage.models import (
 )
 
 _TZ = config.TZ
-_WEIGHTS_SESSION_TYPES = ("push", "pull", "legs")
+_WEIGHTS_SESSION_TYPES = ("push", "pull", "legs", "run")
 
 
 def _today() -> date:
@@ -56,7 +56,12 @@ CALORIE_TARGETS = {
 
 
 def is_weights_day(conn, date_str: str) -> bool:
-    """True if a push/pull/legs session was logged on date_str."""
+    """True if a push/pull/legs/run session was logged on date_str.
+
+    "run" is included alongside weights days because it now regularly
+    substitutes for a leg day in the PPL rotation (tools/gym.py's leg-slot
+    alternation) and is just as calorically demanding.
+    """
     for session in get_recent_sessions(conn, limit=5):
         if session["date"] == date_str and session["session_type"] in _WEIGHTS_SESSION_TYPES:
             return True

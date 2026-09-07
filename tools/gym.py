@@ -173,22 +173,51 @@ _SESSION_PLANS: dict[str, list[dict]] = {
         {"exercise": "weak point", "target_sets": 0, "target_reps": "varies", "notes": "arms, rear delts, calves tend to get dropped"},
     ],
     "run": [
-        {"exercise": "easy run", "target_sets": 1, "target_reps": "20-30 min", "notes": "5:30-6:00/km, conversational pace — aerobic base"},
-        {"exercise": "tempo run", "target_sets": 1, "target_reps": "15 min @ ~4:15/km", "notes": "5 min warmup jog + 5 min cooldown, comfortably hard"},
-        {"exercise": "interval run", "target_sets": 8, "target_reps": "400m @ ~4:00/km, 90s rest", "notes": "5k-specific — directly improves 5k time"},
+        {"exercise": "easy run", "target_sets": 1, "target_reps": "30-45 min",
+         "notes": "~5:50-6:15/km, conversational — aerobic base"},
+        {"exercise": "long run", "target_sets": 1, "target_reps": "60-90 min",
+         "notes": "~5:45-6:15/km, easy effort — Saturday slot, builds toward marathon base"},
+        {"exercise": "tempo run", "target_sets": 1, "target_reps": "20 min @ ~5:10/km",
+         "notes": "5 min warmup jog + 5 min cooldown, comfortably hard"},
+        {"exercise": "interval run", "target_sets": 6, "target_reps": "800m @ ~4:35-4:40/km, 2 min rest",
+         "notes": "VO2max work — Sunday slot, directly targets the sub-20 5k gap"},
+        {"exercise": "run-strength", "target_sets": 3, "target_reps": "8-12",
+         "notes": ("prehab/injury-proofing for the leg-slot substitution: jump squats "
+                   "(start bodyweight, add load gradually), Nordic hamstring curls, "
+                   "single-leg RDLs, calf raises, planks/Pallof press for lower back — "
+                   "see Running-CONTEXT.md for progression order")},
     ],
 }
+
+# Half of what used to always be a leg day is now a run (cardio or a
+# run-strength/prehab session) — the 3rd PPL slot alternates between the two
+# instead of always resolving to "legs", per Ollie's injury-caution request
+# to cut leg-day frequency (docs/context/Running-CONTEXT.md).
+_LEG_SLOT_TYPES = ("legs", "run")
+
+
+def _next_leg_slot_type(conn: sqlite3.Connection) -> str:
+    """Alternate the rotation's 3rd slot between legs and run, based on
+    whichever was logged most recently at that slot."""
+    for session in get_recent_sessions(conn, limit=10):
+        if session["session_type"] in _LEG_SLOT_TYPES:
+            return "legs" if session["session_type"] == "run" else "run"
+    return "run"  # no leg-slot history yet — lead with run/prehab, not a heavy leg day
 
 
 def _next_session_type(conn: sqlite3.Connection) -> str:
     """Return the next session type in the PPL cycle based on recent history.
 
-    Ported from agents/gym.py:get_next_session_type.
+    Ported from agents/gym.py:get_next_session_type. The 3rd slot ("legs")
+    is resolved through _next_leg_slot_type, which alternates it with "run".
     """
     for session in get_recent_sessions(conn, limit=10):
-        if session["session_type"] in _PPL_CYCLE:
-            last_idx = _PPL_CYCLE.index(session["session_type"])
-            return _PPL_CYCLE[(last_idx + 1) % len(_PPL_CYCLE)]
+        st = session["session_type"]
+        if st in _PPL_CYCLE or st == "run":
+            slot = "legs" if st == "run" else st
+            last_idx = _PPL_CYCLE.index(slot)
+            next_slot = _PPL_CYCLE[(last_idx + 1) % len(_PPL_CYCLE)]
+            return _next_leg_slot_type(conn) if next_slot == "legs" else next_slot
     return "push"
 
 
@@ -375,7 +404,9 @@ async def get_next_session_type(conn: sqlite3.Connection) -> dict:
     """Return the next session type due in the push/pull/legs rotation."""
     try:
         session_type = _next_session_type(conn)
-        idx = _PPL_CYCLE.index(session_type)
+        # "run" occupies the 3rd (legs) slot when the leg-slot alternation
+        # lands there — display it at that position rather than raising.
+        idx = _PPL_CYCLE.index("legs" if session_type == "run" else session_type)
         return {"session_type": session_type, "cycle_position": f"{idx + 1}/{len(_PPL_CYCLE)}"}
     except Exception as exc:
         logger.warning("get_next_session_type failed: %s", exc)
@@ -602,7 +633,9 @@ TOOL_SCHEMAS: list[dict] = [
             "name": "get_next_session_type",
             "description": (
                 "Get the next session type due in the push/pull/legs rotation, based on the "
-                "most recently logged PPL session. Use this when the user asks what session "
+                "most recently logged PPL session. The 3rd slot alternates between 'legs' and "
+                "'run' (cardio run or run-strength/prehab) rather than always being legs — may "
+                "return 'run' instead of 'legs'. Use this when the user asks what session "
                 "they're due, or wants a suggestion without specifying push/pull/legs."
             ),
             "parameters": {"type": "object", "properties": {}},

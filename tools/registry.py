@@ -1,9 +1,9 @@
 """Tool registry — aggregates tool schemas and dispatches tool calls (§4.3 of TOOL_CALLING_DESIGN.md).
 
 Each of tools/gym.py, tools/meal.py, tools/calendar.py, tools/news.py,
-tools/reminders.py, tools/briefing.py contributes a TOOL_SCHEMAS list and
-named (conn, **kwargs) -> dict implementations, merged in here domain by
-domain as Phase 2 progresses.
+tools/reminders.py, tools/briefing.py, tools/running.py contributes a
+TOOL_SCHEMAS list and named (conn, **kwargs) -> dict implementations, merged
+in here domain by domain as Phase 2 progresses.
 
 create_reminder is the one tool needing context.job_queue/chat_id (§2.5) —
 build_tool_registry's telegram_context/chat_id params exist now so call
@@ -18,7 +18,7 @@ import sqlite3
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
-from tools import briefing, calendar, fpl, gym, meal, news, reminders
+from tools import briefing, calendar, fpl, gym, meal, news, reminders, running
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,7 @@ def build_tool_registry(
         *briefing.TOOL_SCHEMAS,
         *reminders.TOOL_SCHEMAS,
         *fpl.TOOL_SCHEMAS,
+        *running.TOOL_SCHEMAS,
     ]
 
     # Turn-scoped, never part of the LLM-facing schema — accumulates the
@@ -74,6 +75,9 @@ def build_tool_registry(
         "get_next_session_type": functools.partial(gym.get_next_session_type, conn),
         "get_session_plan": functools.partial(gym.get_session_plan, conn),
         "get_weekly_gym_summary": functools.partial(gym.get_weekly_gym_summary, conn),
+        "log_run": functools.partial(running.log_run, conn),
+        "get_recent_runs": functools.partial(running.get_recent_runs_tool, conn),
+        "get_weekly_running_summary": functools.partial(running.get_weekly_running_summary, conn),
         "log_food": functools.partial(meal.log_food, conn, turn_totals=turn_totals),
         "repeat_meal": functools.partial(meal.repeat_meal, conn, turn_totals=turn_totals),
         "correct_food_log": functools.partial(meal.correct_food_log, conn),

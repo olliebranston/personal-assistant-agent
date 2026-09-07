@@ -19,6 +19,7 @@ from storage.models import (
     RIVAL_HISTORY_DDL,
     RIVAL_PICKS_DDL,
     RIVALS_DDL,
+    RUN_LOG_DDL,
     USER_FOOD_DDL,
     WEIGHT_LOG_DDL,
     XP_PREDICTION_DDL,
@@ -47,6 +48,7 @@ def init_db() -> None:
     conn = get_connection()
     conn.execute(GYM_SESSION_DDL)
     conn.execute(EXERCISE_SET_DDL)
+    conn.execute(RUN_LOG_DDL)
     conn.execute(FOOD_LOG_DDL)
     conn.execute(WEIGHT_LOG_DDL)
     conn.execute(MEAL_PLAN_DDL)

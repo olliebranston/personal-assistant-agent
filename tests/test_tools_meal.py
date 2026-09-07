@@ -503,6 +503,21 @@ async def test_get_daily_macros_returns_correct_targets():
     assert result["kcal"] == 0.0
 
 
+@pytest.mark.asyncio
+async def test_get_daily_macros_treats_a_run_day_as_a_training_day():
+    # A run now regularly substitutes for a leg day in the PPL rotation
+    # (tools/gym.py's leg-slot alternation) — it should get the elevated
+    # "weights" calorie target, not the rest-day one.
+    conn = _make_conn()
+    from storage.models import GymSession, insert_session
+    insert_session(conn, GymSession(date=date.today().isoformat(), session_type="run"))
+
+    result = await get_daily_macros(conn)
+
+    assert result["kcal_target"] == 3300
+    assert result["is_weights_day"] is True
+
+
 # ── log_weight ───────────────────────────────────────────────────────────────
 
 

@@ -4,10 +4,15 @@
 
 | Goal | Current | Target |
 |------|---------|--------|
-| 5k run time | ~27 mins | 20 mins |
+| 5k run time | 24:30 PB | Sub-20:00, by end of 2026 |
+| Marathon time | 3:50 PB | 3:20, London Marathon April 2027 |
 | Bench press | ~60–70kg | 100kg |
 | Back squat | ~80–100kg | 150kg |
 | Physique | Current weight of 105kg and 197 cm | Build muscle + lose fat (body recomp).Building muscle the priority |
+
+See `docs/context/Running-CONTEXT.md` for the full running plan — 2026
+philosophy, weekly structure, training paces, and injury-prevention
+progression. This file covers the gym side only.
 
 
 ---
@@ -17,17 +22,29 @@
 Roughly 3 full gym sessions per week. On higher-activity weeks, up to 2 additional short sessions (<30 mins) — flexible, whatever fits that week.
 
 **Typical week:**
-- 3 × weights (45–60 mins each)
-- 3 × cycle to work (moderate cardio, not tracked)
+- 3 × PPL sessions (45–60 mins each) — the 3rd slot alternates between a
+  legs day and a run (see "Training Split" below and Running-CONTEXT.md)
+- 5 × cycle to work, Mon–Fri (moderate cardio, not tracked)
+- 2 × dedicated runs, Sat + Sun (see Running-CONTEXT.md)
 - 2–4 × competitive sport per month (golf, padel, tennis, football — treat as active recovery / conditioning, not training)
 
-No injuries. No exercises to avoid.
+No injuries. Ollie is cautious about knee and lower-back strain as running
+volume increases — see the injury-prevention progression in
+Running-CONTEXT.md before suggesting loaded plyometric work.
 
 ---
 
 ## Training Split — PPL (3-Day)
 
 Running Push / Pull / Legs across 3 sessions. Each session 45–60 mins.
+
+The 3rd ("legs") slot now alternates between an actual legs day and a run
+— either a cardio run or a run-strength/prehab session — rather than
+always being legs, per Ollie's goal of cutting leg-day frequency to make
+room for running. This is enforced by `tools/gym.py:_next_leg_slot_type`,
+not left to the LLM to infer: `get_next_session_type`/`get_session_plan`
+already return whichever of "legs"/"run" is due. See Running-CONTEXT.md for
+what a "run" 3rd-slot session should actually contain.
 
 On a 5-day week, the two short sessions are unstructured — options listed below.
 
@@ -143,19 +160,23 @@ No fixed prescription. Pick based on what was missed or what needs work:
 
 ---
 
-## Running — 5k Progress
+## Running — 5k & Marathon Progress
 
-**Current estimate:** ~27 mins (~5:24/km pace)  
-**Target:** 20 mins (4:00/km pace)  
-**Gap:** ~7 minutes — substantial but achievable with consistent structured work.
+**Current 5k PB:** 24:30 (~4:54/km)
+**5k target:** sub-20:00 (4:00/km), by end of 2026
+**Marathon PB:** 3:50
+**Marathon target:** 3:20, London Marathon April 2027
 
-Cycling to work gives a cardio base but doesn't directly train running economy. To close the gap meaningfully, running sessions need to be intentional — not just occasional.
+2026 is a base/VO2max/resilience-building year — no marathon-specific
+periodization until Ollie provides that plan around January 2027. Full
+detail (weekly structure, training paces, injury-prevention progression)
+lives in `docs/context/Running-CONTEXT.md`; this section is a pointer, not
+a duplicate.
 
-**Suggested approach (fits into short sessions):**
-- 1–2 dedicated runs per week, 20–30 mins
-- Alternate between easy pace (5:30–6:00/km, aerobic base) and one faster effort (intervals or tempo)
-- Example tempo session: 5 min warmup jog → 15 mins at ~4:15/km effort → 5 min cooldown
-- Example interval session: 6–8 × 400m at hard effort (roughly 4:00/km), 90s rest between
+Cycling to work gives a cardio base but doesn't directly train running
+economy. Running sessions are now structured, not occasional: 2 dedicated
+weekend runs (Sat long/easy, Sun tempo/interval) plus the PPL leg-slot
+alternation described above.
 
 Competitive sports count as active recovery, not running training. Don't conflate them.
 
@@ -242,4 +263,4 @@ Ab crunches, sit-ups, plank, crunches
 
 ---
 
-*Last updated: May 2026*
+*Last updated: September 2026*

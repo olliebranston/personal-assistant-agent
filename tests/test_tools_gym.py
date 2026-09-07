@@ -380,13 +380,15 @@ async def test_get_exercise_progression_does_not_cross_match_unrelated_exercises
 
 
 @pytest.mark.asyncio
-async def test_get_next_session_type_returns_correct_next():
+async def test_get_next_session_type_returns_run_with_no_leg_slot_history():
+    # With no legs/run history yet, the leg-slot alternator leads with "run"
+    # (prehab/running first, not a heavy leg day) — not "legs".
     conn = _make_conn()
     insert_session(conn, GymSession(date=date.today().isoformat(), session_type="pull"))
 
     result = await get_next_session_type(conn)
 
-    assert result == {"session_type": "legs", "cycle_position": "3/3"}
+    assert result == {"session_type": "run", "cycle_position": "3/3"}
 
 
 @pytest.mark.asyncio
@@ -396,6 +398,32 @@ async def test_get_next_session_type_defaults_to_push_with_no_history():
     result = await get_next_session_type(conn)
 
     assert result == {"session_type": "push", "cycle_position": "1/3"}
+
+
+@pytest.mark.asyncio
+async def test_get_next_session_type_alternates_legs_to_run():
+    # push -> pull -> legs -> push -> pull -> next leg-slot should be "run",
+    # alternating away from the "legs" that was last logged at that slot.
+    conn = _make_conn()
+    for session_type in ["push", "pull", "legs", "push", "pull"]:
+        insert_session(conn, GymSession(date=date.today().isoformat(), session_type=session_type))
+
+    result = await get_next_session_type(conn)
+
+    assert result == {"session_type": "run", "cycle_position": "3/3"}
+
+
+@pytest.mark.asyncio
+async def test_get_next_session_type_alternates_run_to_legs():
+    # push -> pull -> run -> push -> pull -> next leg-slot should be "legs",
+    # alternating away from the "run" that was last logged at that slot.
+    conn = _make_conn()
+    for session_type in ["push", "pull", "run", "push", "pull"]:
+        insert_session(conn, GymSession(date=date.today().isoformat(), session_type=session_type))
+
+    result = await get_next_session_type(conn)
+
+    assert result == {"session_type": "legs", "cycle_position": "3/3"}
 
 
 # ── get_session_plan ──────────────────────────────────────────────────────────

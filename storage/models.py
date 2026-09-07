@@ -18,7 +18,7 @@ GYM_SESSION_DDL = """
 CREATE TABLE IF NOT EXISTS gym_sessions (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     date          TEXT    NOT NULL,   -- ISO format YYYY-MM-DD
-    session_type  TEXT    NOT NULL,   -- push | pull | legs | short
+    session_type  TEXT    NOT NULL,   -- push | pull | legs | short | run
     notes         TEXT    DEFAULT ''
 )
 """
@@ -33,6 +33,19 @@ CREATE TABLE IF NOT EXISTS exercise_sets (
     sets        INTEGER NOT NULL,
     reps        INTEGER NOT NULL,     -- target reps per set
     notes       TEXT    DEFAULT ''    -- form cues, drop sets, missed reps, etc.
+)
+"""
+
+RUN_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS run_logs (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    date                 TEXT    NOT NULL,   -- ISO format YYYY-MM-DD
+    run_type             TEXT    NOT NULL,   -- easy | tempo | interval | long | race
+    distance_km          REAL,
+    duration_min         REAL,
+    avg_pace_sec_per_km  REAL,               -- derived when both distance & duration given
+    perceived_effort     INTEGER,            -- optional RPE 1-10
+    notes                TEXT    DEFAULT ''
 )
 """
 
@@ -56,6 +69,18 @@ class ExerciseSet:
     reps: int
     weight_kg: Optional[float] = None   # None for bodyweight
     warmup_kg: Optional[float] = None   # None if no warm-up recorded
+    notes: str = ""
+    id: Optional[int] = field(default=None)
+
+
+@dataclass
+class RunLog:
+    date: str           # YYYY-MM-DD
+    run_type: str        # easy | tempo | interval | long | race
+    distance_km: Optional[float] = None
+    duration_min: Optional[float] = None
+    avg_pace_sec_per_km: Optional[float] = None
+    perceived_effort: Optional[int] = None
     notes: str = ""
     id: Optional[int] = field(default=None)
 
@@ -149,6 +174,38 @@ def get_recent_sessions(
         ]
         result.append(s_dict)
     return result
+
+
+def insert_run(conn: sqlite3.Connection, run: RunLog) -> int:
+    """Insert a run log row and return its new id."""
+    cur = conn.execute(
+        """INSERT INTO run_logs
+               (date, run_type, distance_km, duration_min, avg_pace_sec_per_km, perceived_effort, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (run.date, run.run_type, run.distance_km, run.duration_min,
+         run.avg_pace_sec_per_km, run.perceived_effort, run.notes),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def get_recent_runs(
+    conn: sqlite3.Connection,
+    run_type: str | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    """Return the last N logged runs, newest first, optionally filtered by run_type."""
+    if run_type:
+        rows = conn.execute(
+            "SELECT * FROM run_logs WHERE run_type = ? ORDER BY date DESC, id DESC LIMIT ?",
+            (run_type, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM run_logs ORDER BY date DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------

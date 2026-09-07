@@ -278,6 +278,33 @@ and purpose:
 - `fpl_acknowledge()` — marks the current gameweek's reminder ladder as
   actioned, stopping further nudges.
 
+### 2.8 Running tools (`tools/running.py`)
+
+Three tools added to support the 2026 running-focused base-building plan
+(`Running-CONTEXT.md`). Structured run data (distance/duration/pace) lives
+in a new `run_logs` table, separate from `exercise_sets` — `sets`/`reps`
+there are `INTEGER` and don't fit a run. Run-strength/prehab work (jump
+squats, Nordic curls, etc.) is still logged through `log_exercises` like
+any other gym exercise.
+
+#### `log_run(run_type: str, distance_km: float | null = null, duration_min: float | null = null, perceived_effort: int | null = null, notes: str | null = null) -> dict`
+
+Logs a completed run (`run_type` one of easy/tempo/interval/long/race) to
+`run_logs`, computing `avg_pace_sec_per_km` when both distance and
+duration are given. Also finds-or-creates today's `gym_sessions` row with
+`session_type="run"` — the same today-lookup pattern `log_exercises` uses
+— so a logged run fills the PPL leg-slot rotation the same way a logged
+legs session does.
+
+#### `get_recent_runs(run_type: str | null = null, limit: int = 10) -> dict`
+
+Recent logged runs, newest first, optionally filtered by `run_type`.
+
+#### `get_weekly_running_summary() -> dict`
+
+This week's (Monday-based) logged runs — total distance, count per
+`run_type`. Mirrors `get_weekly_gym_summary`.
+
 ---
 
 ## 3. Context System
