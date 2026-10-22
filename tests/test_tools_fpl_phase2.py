@@ -274,7 +274,10 @@ async def test_get_fpl_gw_review_decomposes_captain_delta_against_the_leader(mon
     assert "error" not in result
     assert result["decomposition"]["vs_rival"]["name"] == "Leader Person"
     captain_row = next(d for d in result["decomposition"]["decomposition"] if d["cause"] == "captain")
-    assert captain_row["delta"] == (10 * 2) - (12 * 2)  # -4: my captain (10) x2 vs theirs (12) x2
+    # -2: the armband's extra points only, 10 vs 12 (was (10*2)-(12*2) = -4
+    # before Oct 2026 — both sides start both players here, so their base
+    # points cancel in the position lines instead of being double-counted).
+    assert captain_row["delta"] == 10 - 12
     assert sum(d["delta"] for d in result["decomposition"]["decomposition"]) == 50 - 90
 
 

@@ -144,7 +144,7 @@ async def test_facts_decompose_the_gap_to_the_leader(_wired):
     assert vs["name"] == "Leader"
     assert vs["gap"] == -24
     causes = {d["cause"]: d["delta"] for d in vs["causes"]}
-    assert causes["captain"] == -22  # Haaland 4x2 vs Salah 15x2
+    assert causes["captain"] == -11  # the armband extra only: Haaland +4 vs Salah +15
     assert sum(causes.values()) == -24  # the causes always add back to the real gap
 
 
@@ -192,6 +192,23 @@ async def test_format_facts_reads_as_a_short_report(_wired):
     assert "Saka" in text
 
 
+def test_format_reports_the_bench_decision_not_bench_vs_bench():
+    # Ollie (GW7): the first version said Diop's bench points cost him an
+    # extra 5 vs the leader; what they actually cost was 3 — Diop (3) sat
+    # while Gvardiol (0) started.
+    facts = {
+        "gw": 7, "my_points": 53, "league_average": 66.4, "league_rank": 8, "league_rank_before": 8,
+        "league_size": 8, "comparisons": [], "captain": {}, "bench_points": 2, "transfers": [],
+        "transfer_net": 0, "hit_cost": 0, "template_holes": [], "widely_bought": [], "flagged": [],
+        "bench_decision": {"bench": "Diop", "bench_points": 3, "starter": "Gvardiol",
+                           "starter_points": 0, "cost": 3},
+    }
+
+    text = "\n".join(fpl_tools.format_pre_deadline_facts(facts))
+
+    assert "Diop (3) sat while Gvardiol (0) started — cost 3" in text
+
+
 # ── "Last week" means the latest *finished* gameweek ────────────────────────
 # Telegram smoke test, 22 Oct 2026: "why did I lose ground in the league last
 # week?" got "points for GW8 still haven't synced" — the model took the
@@ -222,7 +239,7 @@ async def test_summary_is_used_when_every_number_comes_from_the_facts(monkeypatc
     facts = await fpl_tools.build_pre_deadline_facts(_wired)
 
     async def fake_complete(messages, system="", **kwargs):
-        return "Lost 24 to the Leader, almost all on the captaincy (-22). Salah's 15 was the swing."
+        return "Lost 24 to the Leader, mostly the captaincy (-11). Salah's 15 was the swing."
 
     monkeypatch.setattr(fpl_jobs, "complete", fake_complete)
 
@@ -274,7 +291,7 @@ class _FakeContext:
 @pytest.mark.asyncio
 async def test_analysis_message_includes_robins_take(monkeypatch, _wired):
     async def fake_complete(messages, system="", **kwargs):
-        return "Captaincy was the swing: -22 against the Leader."
+        return "Captaincy was the swing: -11 against the Leader."
 
     monkeypatch.setattr(fpl_jobs, "complete", fake_complete)
     bot = _FakeBot()
@@ -284,7 +301,7 @@ async def test_analysis_message_includes_robins_take(monkeypatch, _wired):
     assert len(bot.messages) == 1
     assert "GW7" in bot.messages[0]
     assert "Robin's take" in bot.messages[0]
-    assert "-22" in bot.messages[0]
+    assert "-11" in bot.messages[0]
 
 
 @pytest.mark.asyncio

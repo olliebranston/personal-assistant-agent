@@ -541,6 +541,7 @@ async def get_fpl_gw_review(conn: sqlite3.Connection, gw: int) -> dict:
                     my_points=my_hist["points"], my_picks=my_picks_fmt, my_live_points=live_points,
                     rival_name=leader["player_name"], rival_points=rival_hist["points"],
                     rival_picks=rival_picks_fmt, rival_live_points=live_points, names=names,
+                    positions={eid: _POSITION_NAMES.get(el["element_type"]) for eid, el in elements.items()},
                 )
                 decomposition = {**full_result, "vs_rival": {**full_result["vs_rival"], "entry_id": leader["entry"]}}
 
@@ -628,6 +629,7 @@ async def build_pre_deadline_facts(conn: sqlite3.Connection, gw: int | None = No
         data = await fpl_client.bootstrap()
         elements = element_index(data)
         names = {eid: el["web_name"] for eid, el in elements.items()}
+        positions = {eid: _POSITION_NAMES.get(el["element_type"]) for eid, el in elements.items()}
         live = await fpl_client.live(gw)
         my_picks = [{"element_id": p["element_id"], "multiplier": p["multiplier"]} for p in get_my_picks(conn, gw)]
 
@@ -662,7 +664,7 @@ async def build_pre_deadline_facts(conn: sqlite3.Connection, gw: int | None = No
                 my_points=my_hist["points"], my_picks=my_picks, my_live_points=live,
                 rival_name=target["player_name"], rival_points=rival_points[target["entry"]],
                 rival_picks=[{"element_id": p["element_id"], "multiplier": p["multiplier"]} for p in r_picks],
-                rival_live_points=live, names=names,
+                rival_live_points=live, names=names, positions=positions,
             )
             comparisons.append({
                 "name": target["player_name"],
@@ -719,6 +721,7 @@ async def build_pre_deadline_facts(conn: sqlite3.Connection, gw: int | None = No
             "comparisons": comparisons,
             "captain": captain_facts,
             "bench_points": my_hist.get("points_on_bench") or 0,
+            "bench_decision": _named_bench_swap(fpl_league.best_bench_swap(my_picks, live, positions), names),
             "transfers": transfers,
             "transfer_net": sum(t["in_points"] - t["out_points"] for t in transfers) - hit_cost,
             "hit_cost": hit_cost,
@@ -731,6 +734,13 @@ async def build_pre_deadline_facts(conn: sqlite3.Connection, gw: int | None = No
     except Exception as exc:
         logger.warning("build_pre_deadline_facts failed: %s", exc)
         return {"error": str(exc)}
+
+
+def _named_bench_swap(swap: dict | None, names: dict[int, str]) -> dict | None:
+    if not swap:
+        return None
+    return {**swap, "bench": names.get(swap["bench"], str(swap["bench"])),
+            "starter": names.get(swap["starter"], str(swap["starter"]))}
 
 
 def format_pre_deadline_facts(facts: dict) -> list[str]:
@@ -769,7 +779,14 @@ def format_pre_deadline_facts(facts: dict) -> list[str]:
         if cap.get("best_starter") and cap["best_starter"] != cap["name"]:
             line += f" (best starter: {cap['best_starter']} {cap['best_starter_points']})"
         lines.append(line + ".")
-    lines.append(f"Bench: {facts.get('bench_points', 0)} pts left on it.")
+    swap = facts.get("bench_decision")
+    if swap:
+        lines.append(
+            f"Bench call: {swap['bench']} ({swap['bench_points']}) sat while {swap['starter']} "
+            f"({swap['starter_points']}) started — cost {swap['cost']}."
+        )
+    else:
+        lines.append("Bench call: no swap would have scored more.")
     if facts.get("transfers"):
         moves = "; ".join(f"{t['in']} in ({t['in_points']}), {t['out']} out ({t['out_points']})"
                           for t in facts["transfers"])

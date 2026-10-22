@@ -7,6 +7,7 @@ rather than a synthetic squad, per the addendum's own instruction.
 from __future__ import annotations
 
 from services.fpl_league import (
+    best_bench_swap,
     eo_mode,
     gw_review_decomposition,
     league_eo,
@@ -154,13 +155,20 @@ def test_gw_review_decomposition_captain_delta_matches_addendum_exactly():
     )
 
     captain_row = next(d for d in result["decomposition"] if d["cause"] == "captain")
-    assert captain_row["delta"] == -20  # (13*2) - (23*2), the brief's exact worked example
+    # The brief's worked example said -20, (13*2) - (23*2). Since Oct 2026 the
+    # captain line is only the *extra* captaincy points, 13 - 23 = -10 — the
+    # base points sit in the position lines. The old figure double-counted:
+    # Ollie owned Fernandes too, so -20 overstated what the choice cost.
+    assert captain_row["delta"] == -10
     assert "Haaland" in captain_row["detail"]
     assert "B.Fernandes" in captain_row["detail"]
     assert "You owned both" in captain_row["detail"]  # Ollie owned Fernandes too, per §A
 
 
 def test_gw_review_decomposition_identifies_mukiele_as_top_bench_scorer():
+    # Bench is reported separately now, not as a cause of the gap: bench
+    # points don't count for either side, so "my bench minus theirs" never
+    # explained anything (Ollie's GW7 feedback, Oct 2026).
     my_picks = parse_picks(OLLIE_GW2)
     rival_picks = parse_picks(RIVALS_GW2[1896251][1])
 
@@ -171,8 +179,9 @@ def test_gw_review_decomposition_identifies_mukiele_as_top_bench_scorer():
         names=_NAMES,
     )
 
-    bench_row = next(d for d in result["decomposition"] if d["cause"] == "bench")
-    assert "Mukiele scored 9" in bench_row["detail"]
+    assert result["bench"]["top_name"] == "Mukiele"
+    assert result["bench"]["top_points"] == 9
+    assert all(d["cause"] != "bench" for d in result["decomposition"])
 
 
 def test_gw_review_decomposition_three_causes_sum_exactly_to_the_real_gap():
@@ -188,3 +197,82 @@ def test_gw_review_decomposition_three_causes_sum_exactly_to_the_real_gap():
 
     assert result["vs_rival"]["gap"] == 77 - 127
     assert sum(d["delta"] for d in result["decomposition"]) == result["vs_rival"]["gap"]
+
+
+# ── Starting XI by position + bench decisions (Ollie's GW7 feedback) ────────
+# GW7, real scores: the "squad" cause named bench players (Diop) and lumped
+# everything together; the "bench" cause compared bench points that count
+# for neither side. Starters only now, split by position with head-to-heads.
+
+_POS = {1: "GKP", 2: "GKP", 3: "DEF", 4: "DEF", 5: "DEF", 6: "DEF", 7: "MID", 8: "MID", 9: "FWD",
+        10: "DEF", 11: "MID", 12: "FWD"}
+_NAMES_XI = {1: "Raya", 2: "Verbruggen", 3: "Gvardiol", 4: "Calafiori", 5: "Hall", 6: "Konsa",
+             7: "Palmer", 8: "Rogers", 9: "Haaland", 10: "Diop", 11: "Janelt", 12: "Isak"}
+_LIVE_XI = {1: 9, 2: 2, 3: 0, 4: 6, 5: 4, 6: 10, 7: 2, 8: 2, 9: 13, 10: 3, 11: -1, 12: 8}
+
+
+def _picks(starters: dict[int, int], bench: list[int]) -> list[dict]:
+    return ([{"element_id": e, "multiplier": m} for e, m in starters.items()]
+            + [{"element_id": e, "multiplier": 0} for e in bench])
+
+
+def test_decomposition_splits_starters_by_position_and_never_names_bench_players():
+    mine = _picks({1: 1, 3: 1, 4: 1, 5: 1, 7: 2, 8: 1, 9: 1}, bench=[10, 11])
+    theirs = _picks({2: 1, 4: 1, 5: 1, 6: 1, 7: 1, 8: 1, 9: 2, 12: 1}, bench=[3])
+    my_points = sum(_LIVE_XI[p["element_id"]] * p["multiplier"] for p in mine)
+    their_points = sum(_LIVE_XI[p["element_id"]] * p["multiplier"] for p in theirs)
+
+    result = gw_review_decomposition(
+        my_points=my_points, my_picks=mine, my_live_points=_LIVE_XI,
+        rival_name="Angus", rival_points=their_points, rival_picks=theirs,
+        rival_live_points=_LIVE_XI, names=_NAMES_XI, positions=_POS,
+    )
+
+    by_cause = {d["cause"]: d for d in result["decomposition"]}
+    assert by_cause["defence"]["delta"] == 0 - 10  # your Gvardiol 0 vs his Konsa 10 (shared DEFs cancel)
+    assert "Konsa (10)" in by_cause["defence"]["detail"] and "Gvardiol (0)" in by_cause["defence"]["detail"]
+    assert by_cause["goalkeeper"]["delta"] == 9 - 2
+    # Both started Haaland; he captained him. Only the extra 13 is the
+    # captain line — the base 13s cancel in attack, leaving his Isak.
+    assert by_cause["captain"]["delta"] == 2 - 13
+    assert by_cause["attack"]["delta"] == -8 and "Isak (8)" in by_cause["attack"]["detail"]
+    assert "midfield" not in by_cause  # same midfield starters both sides
+    assert "Diop" not in " ".join(d["detail"] for d in result["decomposition"])
+    assert "bench" not in by_cause
+    assert sum(d["delta"] for d in result["decomposition"]) == result["vs_rival"]["gap"]
+
+
+def test_best_bench_swap_matches_ollies_gw7_reading():
+    # "my lowest scoring player I did select scored 0 points, so [Diop's 3 on
+    # the bench] only cost me 3 points".
+    mine = _picks({1: 1, 3: 1, 4: 1, 5: 1, 7: 2, 8: 1, 9: 1}, bench=[10, 11])
+
+    swap = best_bench_swap(mine, _LIVE_XI, _POS)
+
+    assert (swap["bench"], swap["starter"], swap["cost"]) == (10, 3, 3)  # Diop for Gvardiol
+
+
+def test_best_bench_swap_respects_formation_rules():
+    # Only 3 DEF starting, so bench Isak (8) can't replace Gvardiol (0) — that
+    # would leave 2 defenders. He can replace Janelt (-1): 3 MID -> 2 is legal.
+    mine = _picks({1: 1, 3: 1, 4: 1, 5: 1, 7: 1, 8: 1, 11: 1, 9: 2}, bench=[12])
+
+    swap = best_bench_swap(mine, _LIVE_XI, _POS)
+
+    assert (swap["bench"], swap["starter"], swap["cost"]) == (12, 11, 9)
+
+
+def test_best_bench_swap_keeps_goalkeepers_to_goalkeepers():
+    # A bench GK on 15 could "beat" Gvardiol's 0 by 15, but only the starting
+    # GK (Raya, 9) is a real alternative: cost 6.
+    mine = _picks({1: 1, 3: 1, 4: 1, 5: 1, 7: 2, 8: 1, 9: 1}, bench=[2])
+
+    swap = best_bench_swap(mine, {**_LIVE_XI, 2: 15}, _POS)
+
+    assert (swap["bench"], swap["starter"], swap["cost"]) == (2, 1, 6)
+
+
+def test_best_bench_swap_none_when_the_bench_scored_less():
+    mine = _picks({1: 1, 4: 1, 5: 1, 6: 1, 7: 2}, bench=[3])  # bench Gvardiol scored 0
+
+    assert best_bench_swap(mine, _LIVE_XI, _POS) is None

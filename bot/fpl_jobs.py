@@ -122,10 +122,17 @@ vs his mini-league (gap causes against rivals, captain, bench, transfers, \
 players most of the league owns that he doesn't, flagged players).
 
 Write 3-4 short plain sentences: first why he gained or lost ground (biggest \
-cause first), then what — if anything — to change for the next gameweek. \
-Use ONLY numbers that appear in the facts; never estimate, add up or invent \
-one. Don't list everything, don't repeat the facts verbatim, no preamble, no \
-headings, no emojis. If nothing needs changing, say so.\
+cause first, using the position head-to-heads where they matter), then what \
+to watch for the next gameweek. Use ONLY numbers that appear in the facts; \
+never estimate, add up or invent one. Don't list everything, don't repeat \
+the facts verbatim, no preamble, no headings, no emojis.
+
+The captain line and the bench call are hindsight about last week — never \
+turn them into advice like "start X over Y next week". Don't recommend \
+specific transfers or say none are needed: the transfer recommendation \
+follows in the next message. Forward-looking points may only come from \
+the league template list (players most rivals own that he doesn't) and \
+flagged players.\
 """
 
 _NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
