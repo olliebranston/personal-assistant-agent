@@ -70,9 +70,12 @@ tool returns, and conversation history.
 
 ## 2. Tool Catalog
 
-32 tools across 7 domains, as actually registered in
-`tools/registry.py:build_tool_registry`'s dispatch table (7 gym, 12 meal, 2
-calendar, 1 news, 1 briefing, 1 reminders, 8 FPL). All tools are
+39 tools across 8 domains, as actually registered in
+`tools/registry.py:build_tool_registry`'s dispatch table (9 gym, 12 meal, 2
+calendar, 1 news, 1 briefing, 1 reminders, 8 FPL, 3 running).
+`ToolRegistry.execute` also records each successful *write* in
+`registry.actions`; `main._handle_tool_calling` stores them as a system
+note in conversation memory so the next turn knows what's already logged. All tools are
 `async def tool_name(conn, **kwargs) -> dict`, `conn` bound once per
 incoming message via `functools.partial` (see §4.3) — except
 `create_reminder`, which also gets `telegram_context`/`chat_id` bound the
@@ -82,17 +85,40 @@ function returns, verified against `tools/*.py`.
 
 ### 2.1 Gym tools (`tools/gym.py`)
 
-#### `log_exercises(exercises: list[dict], session_type: str | null = null) -> dict`
+#### `log_exercises(exercises: list[dict], session_type: str | null = null, allow_duplicates: bool = false) -> dict`
 
 Logs every exercise in one message as a **single atomic call** — `exercises`
 is a list of `{exercise_name, sets, reps, weight_kg, warmup_kg, notes}`
 items (even one exercise is a 1-item list). Replaced the original
 `log_exercise` (one call per exercise) after that design proved unreliable
 in practice: the model didn't always self-issue one call per exercise
-mentioned, silently dropping items from multi-exercise messages. Resolves
-or creates today's `gym_sessions` row (append if one exists for today,
-else create using `session_type` or the PPL-cycle fallback).
-**Returns:** `{"logged": true, "session_id": int, "session_type": str, "exercises": [{"exercise": str, "sets": int, "reps": int, "weight_kg": float|null, "warmup_kg": float|null, "notes": str|null}]}` or `{"error": str}` (every item validated before any write, so a malformed item writes nothing rather than partially logging).
+mentioned, silently dropping items from multi-exercise messages.
+
+Which of today's sessions it joins (Ollie's rule, Oct 2026): `session_type="run"`
+(run-strength/prehab) joins today's run session; any gym type joins
+today's non-run session, so a run and gym work on one day stay separate
+while different gym types merge; `null` appends to today's latest session.
+Otherwise a new session is created (type from `session_type` or the
+PPL-cycle fallback). An item identical to one already in the session (same
+exercise after aliases, weight, sets, reps) is skipped unless
+`allow_duplicates` — the model had been re-sending earlier messages'
+exercises on follow-ups.
+**Returns:** `{"logged": bool, "session_id": int|null, "session_type": str, "exercises": [{"log_id": int, "exercise": str, "sets": int, "reps": int, "weight_kg": float|null, "warmup_kg": float|null, "notes": str|null}], "skipped_duplicates": [...], "session_so_far": [{"log_id", "exercise", "sets", "reps", "weight_kg"}], "note"?: str}` or `{"error": str}` (every item validated before any write, so a malformed item writes nothing rather than partially logging).
+
+#### `correct_exercise_log(log_id | exercise_name, date?, new_exercise_name?, sets?, reps?, weight_kg?, warmup_kg?, notes?) -> dict`
+
+Edits one logged entry in place; only the fields given change
+(`weight_kg: null` means bodyweight, distinct from "not given"). Targets by
+`log_id`, or by name on `date` (default today) — several name matches return
+`{"candidates": [...], "message": str}` and change nothing.
+**Returns:** `{"updated": true, "date": str, "before": {...}, "after": {...}}`.
+
+#### `delete_exercise_log(log_id | exercise_name, date?) -> dict`
+
+Same targeting as `correct_exercise_log`. Deleting a session's last
+exercise also removes the now-empty session (it would otherwise count in
+the rotation); run sessions are kept since their runs live in `run_logs`.
+**Returns:** `{"deleted": true, "date": str, "removed": {...}, "session_removed": bool}`.
 
 #### `get_last_session(session_type: str) -> dict`
 
@@ -101,8 +127,9 @@ else create using `session_type` or the PPL-cycle fallback).
 #### `get_exercise_history(exercise_name: str, limit: int = 5) -> dict`
 
 Recent logged sets for one exercise, newest first — matches across known
-abbreviations/aliases (`normalize_exercise_name`, e.g. "incline db bench" ↔
-"incline dumbbell bench"), not just an exact string.
+abbreviations (`normalize_exercise_name`, e.g. "incline db bench" ↔
+"incline dumbbell bench") and the explicit `_EXERCISE_ALIAS_GROUPS` (e.g.
+"DB bench" ↔ "DB bench press"), not just an exact string.
 **Returns:** `{"exercise": str, "entries": [{"date": str, "sets": int, "reps": int, "weight_kg": float|null, "notes": str|null}]}`
 
 #### `get_exercise_progression(exercise_name: str) -> dict`
@@ -292,9 +319,9 @@ any other gym exercise.
 Logs a completed run (`run_type` one of easy/tempo/interval/long/race) to
 `run_logs`, computing `avg_pace_sec_per_km` when both distance and
 duration are given. Also finds-or-creates today's `gym_sessions` row with
-`session_type="run"` — the same today-lookup pattern `log_exercises` uses
-— so a logged run fills the PPL leg-slot rotation the same way a logged
-legs session does.
+`session_type="run"` — never joining a gym session logged the same day
+(they stay separate, Oct 2026) — so a logged run fills the PPL leg-slot
+rotation the same way a logged legs session does.
 
 #### `get_recent_runs(run_type: str | null = null, limit: int = 10) -> dict`
 
@@ -364,7 +391,7 @@ A block of **structured, always-current** data, rebuilt from the DB on every inc
 [Current user message]
 ```
 
-Tool definitions themselves (§2, 32 tools) are passed via the API's native
+Tool definitions themselves (§2, 39 tools) are passed via the API's native
 `tools=[...]` parameter, not inlined into the prompt text — this is what
 lets the model do structured argument-extraction natively instead of via
 `_extract_json` + a hand-rolled JSON schema in prose.

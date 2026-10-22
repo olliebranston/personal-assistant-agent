@@ -73,11 +73,28 @@ def _last_workout(conn: sqlite3.Connection) -> dict | None:
 
 
 def _open_session_today(conn: sqlite3.Connection, today: str) -> dict | None:
+    """Today's session, gym preferred over run (they're kept separate), with
+    what's already in it — so the model can see what's logged and never
+    re-sends it, and has the log_ids for a correction."""
     try:
-        for session in get_recent_sessions(conn, limit=5):
-            if session["date"] == today:
-                return {"session_type": session["session_type"], "session_id": session["id"]}
-        return None
+        todays = [s for s in get_recent_sessions(conn, limit=5) if s["date"] == today]
+        if not todays:
+            return None
+        session = next((s for s in todays if s["session_type"] != "run"), todays[0])
+        return {
+            "session_type": session["session_type"],
+            "session_id": session["id"],
+            "exercises": [
+                {
+                    "log_id": s["id"],
+                    "exercise": s["exercise"],
+                    "sets": s["sets"],
+                    "reps": s["reps"],
+                    "weight_kg": s["weight_kg"],
+                }
+                for s in sorted(session["sets"], key=lambda r: r["id"])
+            ],
+        }
     except Exception as exc:
         logger.debug("Ambient context: open_session_today failed: %s", exc)
         return None

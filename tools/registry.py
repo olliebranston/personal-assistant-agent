@@ -25,10 +25,64 @@ logger = logging.getLogger(__name__)
 ToolFunc = Callable[..., Awaitable[dict]]
 
 
+def _kg(weight) -> str:
+    return f" @{weight:g}kg" if weight is not None else ""
+
+
+def _summarise_log_exercises(args: dict, result: dict) -> str | None:
+    parts = []
+    if result.get("exercises"):
+        parts.append("logged " + ", ".join(
+            f"{e['exercise']} {e['sets']}x{e['reps']}{_kg(e['weight_kg'])} (#{e['log_id']})"
+            for e in result["exercises"]
+        ))
+    if result.get("skipped_duplicates"):
+        parts.append("not re-logged, already logged today: " + ", ".join(
+            e["exercise"] for e in result["skipped_duplicates"]
+        ))
+    return "; ".join(parts) or None
+
+
+def _summarise_set_change(verb: str, key: str):
+    def summarise(args: dict, result: dict) -> str:
+        e = result[key]
+        return f"{verb} exercise #{e['log_id']}: {e['exercise']} {e['sets']}x{e['reps']}{_kg(e['weight_kg'])}"
+    return summarise
+
+
+# Tools that change something, with how to describe a successful call in the
+# per-turn note main.py keeps in conversation memory. Memory otherwise holds
+# only text, so on the next message the model couldn't tell what it had
+# already logged — and sometimes logged it again. Read-only tools are never
+# recorded. A summariser returning None (nothing actually changed) records
+# nothing; tools without one get a generic "tool_name(args)" note.
+_WRITE_SUMMARIES: dict[str, Callable[[dict, dict], str | None] | None] = {
+    "log_exercises": _summarise_log_exercises,
+    "correct_exercise_log": _summarise_set_change("corrected", "after"),
+    "delete_exercise_log": _summarise_set_change("deleted", "removed"),
+    "log_food": lambda a, r: f"logged food #{r['id']}: {r['grams']:g}g {r['food_name']}" if r.get("logged") else None,
+    "repeat_meal": lambda a, r: (
+        f"logged {r['meal_slot']} again from {r['source_date']}: "
+        + ", ".join(f"#{i['id']} {i['grams']:g}g {i['food_name']}" for i in r.get("items", []))
+    ) if r.get("logged") else None,
+    "correct_food_log": lambda a, r: f"corrected food #{r['after']['id']}: {r['after']['description']}" if r.get("updated") else None,
+    "delete_food_log": lambda a, r: f"deleted food #{r['removed']['id']}" if r.get("deleted") else None,
+    "reset_daily_food_log": None,
+    "set_user_food_macros": None,
+    "log_run": None,
+    "log_weight": None,
+    "create_calendar_event": None,
+    "create_reminder": None,
+    "fpl_acknowledge": None,
+}
+
+
 @dataclass
 class ToolRegistry:
     schemas: list[dict]
     dispatch: dict[str, ToolFunc] = field(default_factory=dict)
+    # One line per successful write this turn — main.py stores them in memory.
+    actions: list[str] = field(default_factory=list)
 
     async def execute(self, tool_name: str, args: dict) -> dict:
         """Run the named tool with args, per the §4.2 error convention.
@@ -41,7 +95,28 @@ class ToolRegistry:
         if func is None:
             logger.warning("Tool registry: unknown tool '%s'", tool_name)
             return {"error": f"unknown tool: {tool_name}"}
-        return await func(**args)
+        result = await func(**args)
+        self._record(tool_name, args, result)
+        return result
+
+    def _record(self, tool_name: str, args: dict, result) -> None:
+        """Note a successful write for conversation memory. Never raises — a
+        summary is a convenience, it must not break the tool call itself."""
+        if tool_name not in _WRITE_SUMMARIES or not isinstance(result, dict):
+            return
+        if "error" in result or "candidates" in result:
+            return  # nothing was changed
+        try:
+            summarise = _WRITE_SUMMARIES[tool_name]
+            if summarise is None:
+                compact = ", ".join(f"{k}={v}" for k, v in args.items())
+                note = f"{tool_name}({compact})"[:160]
+            else:
+                note = summarise(args, result)
+            if note:
+                self.actions.append(note)
+        except Exception as exc:
+            logger.debug("Tool registry: couldn't summarise %s: %s", tool_name, exc)
 
 
 def build_tool_registry(
@@ -69,6 +144,8 @@ def build_tool_registry(
 
     dispatch: dict[str, ToolFunc] = {
         "log_exercises": functools.partial(gym.log_exercises, conn),
+        "correct_exercise_log": functools.partial(gym.correct_exercise_log, conn),
+        "delete_exercise_log": functools.partial(gym.delete_exercise_log, conn),
         "get_last_session": functools.partial(gym.get_last_session, conn),
         "get_exercise_history": functools.partial(gym.get_exercise_history, conn),
         "get_exercise_progression": functools.partial(gym.get_exercise_progression, conn),

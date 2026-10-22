@@ -69,8 +69,11 @@ async def log_run(
             notes=notes or "",
         ))
 
+        # Only today's *run* session — a run and a gym session on the same
+        # day stay separate (Ollie's rule, Oct 2026), so a run never gets
+        # filed under that day's push/pull session or vice versa.
         row = conn.execute(
-            "SELECT * FROM gym_sessions WHERE date = ? ORDER BY id DESC LIMIT 1",
+            "SELECT * FROM gym_sessions WHERE date = ? AND session_type = 'run' ORDER BY id DESC LIMIT 1",
             (today,),
         ).fetchone()
         if row:

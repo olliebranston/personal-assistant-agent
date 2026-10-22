@@ -115,3 +115,43 @@ async def test_execute_create_reminder_receives_bound_context_and_chat_id():
     })
 
     assert result.get("scheduled") is True
+
+
+# ── Per-turn action record (fed into conversation memory by main.py) ────────
+
+
+@pytest.mark.asyncio
+async def test_execute_records_successful_writes_but_not_reads():
+    registry = build_tool_registry(_make_conn())
+
+    await registry.execute("log_exercises", {
+        "exercises": [{"exercise_name": "dips", "sets": 4, "reps": 10}],
+        "session_type": "push",
+    })
+    await registry.execute("log_food", {"food_name": "chicken breast", "grams": 200})
+    await registry.execute("get_daily_macros", {})
+
+    assert len(registry.actions) == 2
+    assert "dips 4x10" in registry.actions[0]
+    assert "#" in registry.actions[0]  # carries the log_id for a later fix
+    assert "200g chicken breast" in registry.actions[1]
+
+
+@pytest.mark.asyncio
+async def test_execute_does_not_record_a_failed_or_ambiguous_write():
+    registry = build_tool_registry(_make_conn())
+
+    await registry.execute("delete_exercise_log", {"exercise_name": "squats"})  # nothing logged -> error
+
+    assert registry.actions == []
+
+
+@pytest.mark.asyncio
+async def test_execute_records_skipped_duplicates_as_not_logged():
+    registry = build_tool_registry(_make_conn())
+    item = {"exercises": [{"exercise_name": "dips", "sets": 4, "reps": 10}], "session_type": "push"}
+
+    await registry.execute("log_exercises", item)
+    await registry.execute("log_exercises", item)
+
+    assert "already logged" in registry.actions[1]

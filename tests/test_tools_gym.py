@@ -17,6 +17,8 @@ from storage.models import (
     insert_set,
 )
 from tools.gym import (
+    correct_exercise_log,
+    delete_exercise_log,
     get_exercise_history,
     get_exercise_progression,
     get_last_session,
@@ -288,10 +290,8 @@ async def test_progression_finds_history_logged_under_a_known_alias():
     assert result["found"] is True
     assert result["basis"]["weight_kg"] == 52.5
 
-    plan = await get_session_plan(conn, session_type="push")
-    ohp = next(ex for ex in plan["exercises"] if ex["exercise"] == "overhead press")
-    assert ohp["basis"] == "progression"
-    assert ohp["weight_kg"] == 52.5
+    # (OHP left the push plan in Oct 2026, so the plan-level half of this
+    # check now lives in test_plan_finds_history_logged_under_variant_names.)
 
     # And the reverse direction: querying by the shorthand also finds sets
     # logged under the canonical full name.
@@ -436,7 +436,7 @@ async def test_get_session_plan_returns_plan_for_known_type():
     result = await get_session_plan(conn, session_type="push")
 
     assert result["session_type"] == "push"
-    assert any(ex["exercise"] == "bench press" for ex in result["exercises"])
+    assert any(ex["exercise"] == "DB bench press" for ex in result["exercises"])
 
 
 @pytest.mark.asyncio
@@ -456,21 +456,22 @@ async def test_get_session_plan_merges_weights_for_exercises_with_history():
     # that merge itself, in-process, so weights are always included.
     conn = _make_conn()
     s1 = insert_session(conn, GymSession(date="2026-06-01", session_type="push"))
-    insert_set(conn, ExerciseSet(session_id=s1, exercise="bench press", sets=4, reps=8, weight_kg=80.0))
+    insert_set(conn, ExerciseSet(session_id=s1, exercise="DB bench press", sets=4, reps=8, weight_kg=32.5))
 
     result = await get_session_plan(conn, session_type="push")
 
-    bench = next(ex for ex in result["exercises"] if ex["exercise"] == "bench press")
+    bench = next(ex for ex in result["exercises"] if ex["exercise"] == "DB bench press")
     assert bench["basis"] == "progression"
-    assert bench["weight_kg"] == 80.0
+    assert bench["weight_kg"] == 32.5
     assert (bench["sets"], bench["reps"]) == (4, 10)
 
-    # An exercise with no logged history at all falls back to the static plan.
-    ohp = next(ex for ex in result["exercises"] if ex["exercise"] == "overhead press")
-    assert ohp["basis"] == "static"
-    assert ohp["weight_kg"] is None
-    assert ohp["sets"] == 4
-    assert ohp["reps"] == "8"
+    # An exercise with no logged history at all falls back to the static
+    # plan — 3x8, the bottom of the progression cycle (Ollie, Oct 2026).
+    raises = next(ex for ex in result["exercises"] if ex["exercise"] == "machine raises")
+    assert raises["basis"] == "static"
+    assert raises["weight_kg"] is None
+    assert raises["sets"] == 3
+    assert raises["reps"] == "8"
 
 
 @pytest.mark.asyncio
@@ -496,11 +497,9 @@ async def test_get_session_plan_orders_compounds_before_isolation():
 
     push = await get_session_plan(conn, session_type="push")
     push_order = [ex["exercise"] for ex in push["exercises"]]
-    # Compounds (dips, bench press, overhead press) all precede isolation
-    # (pec fly, DB lateral raises, rope pulldowns).
-    assert push_order.index("overhead press") < push_order.index("pec fly")
-    assert push_order.index("overhead press") < push_order.index("DB lateral raises")
-    assert push_order.index("overhead press") < push_order.index("rope pulldowns")
+    # Compounds (dips, DB bench press) all precede isolation.
+    for isolation in ("pec fly", "machine raises", "overhead tricep extensions", "rope pulldowns"):
+        assert push_order.index("DB bench press") < push_order.index(isolation)
 
     legs = await get_session_plan(conn, session_type="legs")
     legs_order = [ex["exercise"] for ex in legs["exercises"]]
@@ -538,3 +537,257 @@ async def test_get_weekly_gym_summary_counts_sessions_this_week():
     assert result["session_count"] == 1
     assert result["sessions"][0]["date"] == today
     assert result["sessions"][0]["exercise_count"] == 1
+
+
+# ── Oct 2026 routine + logging safeguards ───────────────────────────────────
+# Ollie's new standard push/pull days, plus the guards against the bugs seen
+# in daily use: re-sent exercises logged twice, no way to fix a wrong log,
+# and history logged under a slightly different name not reaching the plan.
+
+
+@pytest.mark.asyncio
+async def test_push_and_pull_plans_are_the_oct_2026_routine():
+    conn = _make_conn()
+
+    push = await get_session_plan(conn, session_type="push")
+    pull = await get_session_plan(conn, session_type="pull")
+
+    assert [ex["exercise"] for ex in push["exercises"]] == [
+        "dips", "DB bench press", "pec fly", "machine raises",
+        "overhead tricep extensions", "rope pulldowns",
+    ]
+    assert [ex["exercise"] for ex in pull["exercises"]] == [
+        "pull-ups", "bent over DB rows", "delt fly", "face pulls",
+        "incline DB bicep curls", "rope pull-ups",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_plan_finds_history_logged_under_variant_names():
+    # The names below are exactly how these exercises were logged on the VM
+    # (audit, 22 Oct 2026). Without the alias table every one of them showed
+    # as static/no weight in the new plan.
+    conn = _make_conn()
+    s1 = insert_session(conn, GymSession(date="2026-10-17", session_type="push"))
+    for name, kg in [
+        ("DB bench", 30.0), ("machine lateral raises", 40.0),
+        ("overhead rope extensions", 25.0), ("rope pull downs", 30.0),
+    ]:
+        insert_set(conn, ExerciseSet(session_id=s1, exercise=name, sets=3, reps=10, weight_kg=kg))
+    s2 = insert_session(conn, GymSession(date="2026-10-20", session_type="pull"))
+    for name, kg in [
+        ("DB Bent Over Rows", 26.0), ("incline DB curls", 12.0), ("rope pull ups", 45.0),
+    ]:
+        insert_set(conn, ExerciseSet(session_id=s2, exercise=name, sets=3, reps=10, weight_kg=kg))
+
+    push = {ex["exercise"]: ex for ex in (await get_session_plan(conn, "push"))["exercises"]}
+    pull = {ex["exercise"]: ex for ex in (await get_session_plan(conn, "pull"))["exercises"]}
+
+    for plan, name, kg in [
+        (push, "DB bench press", 30.0), (push, "machine raises", 40.0),
+        (push, "overhead tricep extensions", 25.0), (push, "rope pulldowns", 30.0),
+        (pull, "bent over DB rows", 26.0), (pull, "incline DB bicep curls", 12.0),
+        (pull, "rope pull-ups", 45.0),
+    ]:
+        assert plan[name]["basis"] == "progression", name
+        assert plan[name]["weight_kg"] == kg, name
+
+
+@pytest.mark.asyncio
+async def test_alias_table_keeps_incline_db_press_separate_from_db_bench_press():
+    conn = _make_conn()
+    s1 = insert_session(conn, GymSession(date="2026-10-17", session_type="push"))
+    insert_set(conn, ExerciseSet(session_id=s1, exercise="incline db press", sets=3, reps=8, weight_kg=26.0))
+
+    result = await get_exercise_progression(conn, exercise_name="DB bench press")
+
+    assert result["found"] is False
+
+
+@pytest.mark.asyncio
+async def test_log_exercises_skips_an_exercise_already_logged_identically_today():
+    # The model sometimes re-sends earlier messages' exercises on a follow-up
+    # (two Sept push sessions had 12 rows for 6 exercises).
+    conn = _make_conn()
+
+    await log_exercises(conn, exercises=[
+        {"exercise_name": "dips", "sets": 4, "reps": 10, "weight_kg": None},
+        {"exercise_name": "DB bench", "sets": 3, "reps": 8, "weight_kg": 30.0},
+    ])
+    second = await log_exercises(conn, exercises=[
+        {"exercise_name": "dips", "sets": 4, "reps": 10, "weight_kg": None},
+        {"exercise_name": "DB bench press", "sets": 3, "reps": 8, "weight_kg": 30.0},
+        {"exercise_name": "pec fly", "sets": 3, "reps": 8, "weight_kg": 50.0},
+    ])
+
+    assert [e["exercise"] for e in second["exercises"]] == ["pec fly"]
+    assert {s["exercise"] for s in second["skipped_duplicates"]} == {"dips", "DB bench press"}
+    assert len(get_recent_sessions(conn)[0]["sets"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_log_exercises_allow_duplicates_logs_a_genuine_repeat():
+    conn = _make_conn()
+    await log_exercises(conn, exercises=[{"exercise_name": "dips", "sets": 4, "reps": 10}])
+
+    second = await log_exercises(
+        conn, exercises=[{"exercise_name": "dips", "sets": 4, "reps": 10}], allow_duplicates=True,
+    )
+
+    assert len(second["exercises"]) == 1
+    assert len(get_recent_sessions(conn)[0]["sets"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_log_exercises_returns_whole_session_so_far_with_ids():
+    conn = _make_conn()
+    await log_exercises(conn, exercises=[{"exercise_name": "dips", "sets": 4, "reps": 10}])
+
+    second = await log_exercises(conn, exercises=[
+        {"exercise_name": "pec fly", "sets": 3, "reps": 8, "weight_kg": 50.0},
+    ])
+
+    so_far = second["session_so_far"]
+    assert [e["exercise"] for e in so_far] == ["dips", "pec fly"]
+    assert all(isinstance(e["log_id"], int) for e in so_far)
+    assert second["exercises"][0]["log_id"] == so_far[1]["log_id"]
+
+
+@pytest.mark.asyncio
+async def test_gym_exercises_never_join_todays_run_session():
+    # Ollie's rule (Oct 2026): a run and a gym session on the same day are
+    # separate sessions — a morning run must not swallow evening pull work.
+    conn = _make_conn()
+    today = date.today().isoformat()
+    run_id = insert_session(conn, GymSession(date=today, session_type="run"))
+
+    result = await log_exercises(conn, exercises=[
+        {"exercise_name": "pull-ups", "sets": 4, "reps": 8},
+    ], session_type="pull")
+
+    assert result["session_id"] != run_id
+    assert result["session_type"] == "pull"
+
+
+@pytest.mark.asyncio
+async def test_run_strength_work_still_joins_todays_run_session():
+    conn = _make_conn()
+    today = date.today().isoformat()
+    run_id = insert_session(conn, GymSession(date=today, session_type="run"))
+
+    result = await log_exercises(conn, exercises=[
+        {"exercise_name": "jump squats", "sets": 3, "reps": 8},
+    ], session_type="run")
+
+    assert result["session_id"] == run_id
+
+
+@pytest.mark.asyncio
+async def test_different_gym_types_on_the_same_day_merge():
+    conn = _make_conn()
+    today = date.today().isoformat()
+    push_id = insert_session(conn, GymSession(date=today, session_type="push"))
+
+    result = await log_exercises(conn, exercises=[
+        {"exercise_name": "face pulls", "sets": 3, "reps": 10, "weight_kg": 20.0},
+    ], session_type="pull")
+
+    assert result["session_id"] == push_id
+
+
+# ── correct_exercise_log / delete_exercise_log ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_correct_exercise_log_by_id_updates_only_given_fields():
+    conn = _make_conn()
+    logged = await log_exercises(conn, exercises=[
+        {"exercise_name": "pec fly", "sets": 3, "reps": 8, "weight_kg": 50.0},
+    ])
+    log_id = logged["exercises"][0]["log_id"]
+
+    result = await correct_exercise_log(conn, log_id=log_id, weight_kg=55.0)
+
+    assert result["updated"] is True
+    assert result["before"]["weight_kg"] == 50.0
+    assert result["after"]["weight_kg"] == 55.0
+    assert result["after"]["sets"] == 3
+    row = get_recent_sessions(conn)[0]["sets"][0]
+    assert (row["weight_kg"], row["sets"], row["reps"]) == (55.0, 3, 8)
+
+
+@pytest.mark.asyncio
+async def test_correct_exercise_log_by_name_on_an_earlier_date():
+    conn = _make_conn()
+    s1 = insert_session(conn, GymSession(date="2026-10-17", session_type="push"))
+    insert_set(conn, ExerciseSet(session_id=s1, exercise="DB bench", sets=3, reps=8, weight_kg=30.0))
+
+    result = await correct_exercise_log(conn, exercise_name="DB bench press", date="2026-10-17", reps=10)
+
+    assert result["updated"] is True
+    assert result["after"]["reps"] == 10
+
+
+@pytest.mark.asyncio
+async def test_correct_exercise_log_with_ambiguous_name_returns_candidates():
+    conn = _make_conn()
+    await log_exercises(conn, exercises=[
+        {"exercise_name": "dips", "sets": 4, "reps": 10},
+        {"exercise_name": "dips", "sets": 3, "reps": 12, "weight_kg": 10.0},
+    ])
+
+    result = await correct_exercise_log(conn, exercise_name="dips", reps=8)
+
+    assert "updated" not in result
+    assert len(result["candidates"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_delete_exercise_log_by_id_removes_the_row():
+    conn = _make_conn()
+    logged = await log_exercises(conn, exercises=[
+        {"exercise_name": "dips", "sets": 4, "reps": 10},
+        {"exercise_name": "pec fly", "sets": 3, "reps": 8, "weight_kg": 50.0},
+    ])
+
+    result = await delete_exercise_log(conn, log_id=logged["exercises"][1]["log_id"])
+
+    assert result["deleted"] is True
+    assert [s["exercise"] for s in get_recent_sessions(conn)[0]["sets"]] == ["dips"]
+
+
+@pytest.mark.asyncio
+async def test_deleting_the_only_exercise_removes_the_empty_session():
+    # An empty session would otherwise still count as a workout in the
+    # push/pull/legs rotation.
+    conn = _make_conn()
+    logged = await log_exercises(conn, exercises=[{"exercise_name": "dips", "sets": 4, "reps": 10}])
+
+    await delete_exercise_log(conn, log_id=logged["exercises"][0]["log_id"])
+
+    assert get_recent_sessions(conn) == []
+
+
+@pytest.mark.asyncio
+async def test_delete_exercise_log_ambiguous_name_deletes_nothing():
+    conn = _make_conn()
+    await log_exercises(conn, exercises=[
+        {"exercise_name": "dips", "sets": 4, "reps": 10},
+        {"exercise_name": "dips", "sets": 3, "reps": 12, "weight_kg": 10.0},
+    ])
+
+    result = await delete_exercise_log(conn, exercise_name="dips")
+
+    assert "deleted" not in result
+    assert len(result["candidates"]) == 2
+    assert len(get_recent_sessions(conn)[0]["sets"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_delete_exercise_log_unknown_name_errors():
+    conn = _make_conn()
+    await log_exercises(conn, exercises=[{"exercise_name": "dips", "sets": 4, "reps": 10}])
+
+    result = await delete_exercise_log(conn, exercise_name="squats")
+
+    assert "error" in result

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections import deque
 
-_MAX_MESSAGES = 10  # 5 full exchanges (user + assistant) — §3.1 of TOOL_CALLING_DESIGN.md
+# 5 full exchanges — §3.1 of TOOL_CALLING_DESIGN.md. Each exchange is a user
+# and an assistant message, plus a system note when the turn logged
+# something (main._handle_tool_calling), so up to 3 entries per exchange.
+_MAX_MESSAGES = 15
 _store: dict[int, deque[dict]] = {}
 
 

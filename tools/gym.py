@@ -16,11 +16,15 @@ import config
 from storage.models import (
     ExerciseSet,
     GymSession,
+    delete_exercise_set,
     get_distinct_exercise_names,
     get_last_sets_for_exercise,
     get_recent_sessions,
+    get_set_by_id,
+    get_sets_for_date,
     insert_session,
     insert_set,
+    update_exercise_set,
 )
 
 _TZ = config.TZ
@@ -70,6 +74,22 @@ _TOKEN_ALIASES: dict[str, str] = {
 # 0.971).
 _FUZZY_MATCH_CUTOFF = 0.9
 
+# Exercises Ollie has logged under more than one name — the first entry of
+# each group is the canonical _SESSION_PLANS name. An explicit list rather
+# than a looser fuzzy cutoff: "DB bench" vs "DB bench press" scores well below
+# 0.9, but lowering the cutoff conflates genuinely different exercises (see
+# above). Variants come from the real logged names on the VM (Oct 2026 audit).
+# A group's members are never fuzzy-matched to anything outside the group.
+_EXERCISE_ALIAS_GROUPS: list[tuple[str, ...]] = [
+    ("DB bench press", "DB press", "DB bench", "dumbbell bench press", "flat DB press"),
+    ("machine raises", "machine lateral raises"),
+    ("overhead tricep extensions", "overhead rope extensions", "overhead extensions"),
+    ("rope pulldowns", "rope pull downs"),
+    ("bent over DB rows", "DB bent over rows", "bent over rows"),
+    ("incline DB bicep curls", "incline DB curls"),
+    ("rope pull-ups", "rope pull ups", "rope pullups"),
+]
+
 
 def normalize_exercise_name(name: str) -> str:
     """Lowercase, strip punctuation, collapse whitespace, and expand known
@@ -80,6 +100,21 @@ def normalize_exercise_name(name: str) -> str:
     for token in cleaned.split():
         expanded.extend(_TOKEN_ALIASES.get(token, token).split())
     return " ".join(expanded)
+
+
+# normalized variant -> normalized canonical, built once from the groups above.
+_ALIAS_INDEX: dict[str, str] = {
+    normalize_exercise_name(variant): normalize_exercise_name(group[0])
+    for group in _EXERCISE_ALIAS_GROUPS
+    for variant in group
+}
+
+
+def _exercise_key(name: str) -> str:
+    """The identity two logged names must share to count as the same
+    exercise: the normalized name, folded onto its alias group if it has one."""
+    normalized = normalize_exercise_name(name)
+    return _ALIAS_INDEX.get(normalized, normalized)
 
 
 def _known_exercise_vocabulary(conn: sqlite3.Connection) -> list[str]:
@@ -102,13 +137,15 @@ def _resolve_canonical_exercise(conn: sqlite3.Connection, name: str) -> str | No
     planned) that name most likely refers to — via normalized-form exact
     match first, then a conservative fuzzy match. Returns None if nothing
     resolves confidently (caller still tries the raw name as a fallback)."""
-    target = normalize_exercise_name(name)
+    target = _exercise_key(name)
     normalized_map: dict[str, str] = {}
     for candidate in _known_exercise_vocabulary(conn):
-        normalized_map.setdefault(normalize_exercise_name(candidate), candidate)
+        normalized_map.setdefault(_exercise_key(candidate), candidate)
 
     if target in normalized_map:
         return normalized_map[target]
+    if target in _ALIAS_INDEX.values():
+        return None  # an explicit alias group is matched exactly, never fuzzily
 
     close = difflib.get_close_matches(target, list(normalized_map.keys()), n=1, cutoff=_FUZZY_MATCH_CUTOFF)
     return normalized_map[close[0]] if close else None
@@ -116,13 +153,18 @@ def _resolve_canonical_exercise(conn: sqlite3.Connection, name: str) -> str | No
 
 def _exercise_name_candidates(conn: sqlite3.Connection, name: str) -> list[str]:
     """All names that should be treated as the same exercise for history
-    lookups: the given name, plus its resolved canonical form (if any) —
-    so a lookup for a shorthand/abbreviation finds sets logged under the
-    full name and vice versa."""
+    lookups: the given name, its resolved canonical form (if any), and every
+    logged name sharing an alias group with either — so a lookup for a
+    shorthand/abbreviation finds sets logged under the full name and vice
+    versa, and "DB bench press" finds sets logged as "DB bench"."""
     candidates = {name}
     canonical = _resolve_canonical_exercise(conn, name)
     if canonical:
         candidates.add(canonical)
+    keys = {_exercise_key(c) for c in candidates}
+    for logged in get_distinct_exercise_names(conn):
+        if _exercise_key(logged) in keys:
+            candidates.add(logged)
     return list(candidates)
 
 
@@ -142,21 +184,25 @@ def _get_history_across_aliases(conn: sqlite3.Connection, exercise_name: str, li
 # Ported from agents/gym.py:_SESSION_PLANS (free text) into the structured
 # shape required by get_session_plan's return type (§2.1).
 _SESSION_PLANS: dict[str, list[dict]] = {
+    # Ollie's standard push/pull days from Oct 2026, in the order he does
+    # them. 3x8 (the bottom of _PROGRESSION_CYCLE) is only the fallback for
+    # an exercise with no history — get_session_plan uses logged history
+    # wherever it exists. Swaps on the day are fine; this is the default.
     "push": [
         {"exercise": "dips", "target_sets": 4, "target_reps": "10", "notes": None},
-        {"exercise": "bench press", "target_sets": 5, "target_reps": "8", "notes": None},
-        {"exercise": "overhead press", "target_sets": 4, "target_reps": "8", "notes": None},
-        {"exercise": "pec fly", "target_sets": 4, "target_reps": "8", "notes": "pick 1 isolation — alternatives: cable fly 3x10, incline DB bench 4x8"},
-        {"exercise": "DB lateral raises", "target_sets": 4, "target_reps": "15", "notes": None},
-        {"exercise": "rope pulldowns", "target_sets": 4, "target_reps": "10", "notes": None},
+        {"exercise": "DB bench press", "target_sets": 3, "target_reps": "8", "notes": None},
+        {"exercise": "pec fly", "target_sets": 3, "target_reps": "8", "notes": None},
+        {"exercise": "machine raises", "target_sets": 3, "target_reps": "8", "notes": None},
+        {"exercise": "overhead tricep extensions", "target_sets": 3, "target_reps": "8", "notes": None},
+        {"exercise": "rope pulldowns", "target_sets": 3, "target_reps": "8", "notes": None},
     ],
     "pull": [
         {"exercise": "pull-ups", "target_sets": 4, "target_reps": "5-8", "notes": None},
-        {"exercise": "bent over bar rows", "target_sets": 5, "target_reps": "10", "notes": None},
-        {"exercise": "machine rows", "target_sets": 4, "target_reps": "8", "notes": "pick 1 row — alternatives: cable rows 4x8, T-bar rows 3x10"},
-        {"exercise": "face pulls", "target_sets": 4, "target_reps": "10", "notes": None},
-        {"exercise": "bar curls", "target_sets": 4, "target_reps": "10", "notes": None},
-        {"exercise": "incline DB curls", "target_sets": 4, "target_reps": "10", "notes": "if time — alternative: cable delt fly 4x8"},
+        {"exercise": "bent over DB rows", "target_sets": 3, "target_reps": "8", "notes": None},
+        {"exercise": "delt fly", "target_sets": 3, "target_reps": "8", "notes": None},
+        {"exercise": "face pulls", "target_sets": 3, "target_reps": "8", "notes": None},
+        {"exercise": "incline DB bicep curls", "target_sets": 3, "target_reps": "8", "notes": None},
+        {"exercise": "rope pull-ups", "target_sets": 3, "target_reps": "8", "notes": None},
     ],
     "legs": [
         {"exercise": "Bulgarian split squats", "target_sets": 4, "target_reps": "10", "notes": "do these first — brutal"},
@@ -221,10 +267,47 @@ def _next_session_type(conn: sqlite3.Connection) -> str:
     return "push"
 
 
+def _todays_session_row(conn: sqlite3.Connection, today: str, session_type: str | None) -> sqlite3.Row | None:
+    """Which of today's sessions a log joins (Ollie's rule, Oct 2026): a run
+    and a gym session on the same day stay separate, while different gym
+    types on one day merge. session_type="run" joins today's run session;
+    any gym type joins today's non-run session; None (type unknown) keeps
+    the original behaviour of appending to today's latest session."""
+    if session_type is None:
+        clause, params = "", (today,)
+    elif session_type == "run":
+        clause, params = " AND session_type = 'run'", (today,)
+    else:
+        clause, params = " AND session_type != 'run'", (today,)
+    return conn.execute(
+        f"SELECT * FROM gym_sessions WHERE date = ?{clause} ORDER BY id DESC LIMIT 1",
+        params,
+    ).fetchone()
+
+
+def _same_weight(a: float | None, b: float | None) -> bool:
+    if a is None or b is None:
+        return a is None and b is None
+    return round(float(a), 2) == round(float(b), 2)
+
+
+def _set_view(row: dict) -> dict:
+    """The model-facing shape of one logged exercise row — log_id included so
+    a follow-up correct/delete can target it exactly."""
+    return {
+        "log_id": row["id"],
+        "exercise": row["exercise"],
+        "sets": row["sets"],
+        "reps": row["reps"],
+        "weight_kg": row["weight_kg"],
+    }
+
+
 async def log_exercises(
     conn: sqlite3.Connection,
     exercises: list[dict],
     session_type: str | None = None,
+    allow_duplicates: bool = False,
 ) -> dict:
     """Log one or more exercises to today's session in a single atomic call
     (§3.2d), appending to it or creating a new one.
@@ -233,6 +316,13 @@ async def log_exercises(
     exercise is a 1-item list — so a multi-exercise message can't silently
     lose an item to the model choosing to call this fewer times than there
     were exercises (the previous one-exercise-per-call design's failure mode).
+
+    An item identical (same exercise after aliases, weight, sets and reps) to
+    one already in today's session is skipped and reported back in
+    skipped_duplicates unless allow_duplicates is set — the model has been
+    seen re-sending an earlier message's exercises on a follow-up, doubling
+    them up. The reply carries session_so_far, the whole session, so each
+    answer can show everything logged today rather than just this message.
     """
     try:
         if not exercises:
@@ -249,20 +339,22 @@ async def log_exercises(
 
         today = datetime.now(tz=_TZ).date().isoformat()
 
-        # Query directly for today's date — any session_type is fine, always append
-        row = conn.execute(
-            "SELECT * FROM gym_sessions WHERE date = ? ORDER BY id DESC LIMIT 1",
-            (today,),
-        ).fetchone()
-
+        row = _todays_session_row(conn, today, session_type)
         if row:
             session_id = row["id"]
             resolved_type = row["session_type"]
+            existing = [
+                dict(r) for r in conn.execute(
+                    "SELECT * FROM exercise_sets WHERE session_id = ?", (session_id,)
+                ).fetchall()
+            ]
         else:
             resolved_type = session_type or _next_session_type(conn)
-            session_id = insert_session(conn, GymSession(date=today, session_type=resolved_type))
+            session_id = None  # created only once there's something to write
+            existing = []
 
         logged = []
+        skipped = []
         for item in exercises:
             exercise_name = item["exercise_name"]
             sets = item["sets"]
@@ -270,7 +362,19 @@ async def log_exercises(
             weight_kg = item.get("weight_kg")
             warmup_kg = item.get("warmup_kg")
             notes = item.get("notes")
-            insert_set(conn, ExerciseSet(
+
+            if not allow_duplicates and any(
+                _exercise_key(e["exercise"]) == _exercise_key(exercise_name)
+                and e["sets"] == sets and e["reps"] == reps
+                and _same_weight(e["weight_kg"], weight_kg)
+                for e in existing
+            ):
+                skipped.append({"exercise": exercise_name, "sets": sets, "reps": reps, "weight_kg": weight_kg})
+                continue
+
+            if session_id is None:
+                session_id = insert_session(conn, GymSession(date=today, session_type=resolved_type))
+            log_id = insert_set(conn, ExerciseSet(
                 session_id=session_id,
                 exercise=exercise_name,
                 weight_kg=weight_kg,
@@ -280,6 +384,7 @@ async def log_exercises(
                 notes=notes or "",
             ))
             logged.append({
+                "log_id": log_id,
                 "exercise": exercise_name,
                 "sets": sets,
                 "reps": reps,
@@ -288,14 +393,135 @@ async def log_exercises(
                 "notes": notes,
             })
 
-        return {
-            "logged": True,
+        session_so_far = [
+            _set_view(dict(r)) for r in conn.execute(
+                "SELECT * FROM exercise_sets WHERE session_id = ? ORDER BY id", (session_id,)
+            ).fetchall()
+        ] if session_id is not None else []
+
+        result = {
+            "logged": bool(logged),
             "session_id": session_id,
             "session_type": resolved_type,
             "exercises": logged,
+            "skipped_duplicates": skipped,
+            "session_so_far": session_so_far,
         }
+        if skipped and not logged:
+            result["note"] = "every exercise was already logged today — nothing new written"
+        return result
     except Exception as exc:
         logger.warning("log_exercises failed: %s", exc)
+        return {"error": str(exc)}
+
+
+def _find_logged_set(
+    conn: sqlite3.Connection,
+    log_id: int | None,
+    exercise_name: str,
+    date: str | None,
+) -> tuple[dict | None, dict | None]:
+    """Resolve which logged row a correct/delete means: (row, None) when it's
+    unambiguous, else (None, reply) where reply is an error or — when a name
+    matches several rows — the candidates, so the model asks Ollie rather
+    than guessing (same rule as delete_food_log)."""
+    if log_id is not None:
+        row = get_set_by_id(conn, int(log_id))
+        if row is None:
+            return None, {"error": f"no logged exercise with id {log_id}"}
+        return row, None
+    if not exercise_name:
+        return None, {"error": "give a log_id or an exercise_name"}
+
+    day = date or datetime.now(tz=_TZ).date().isoformat()
+    names = {n.lower() for n in _exercise_name_candidates(conn, exercise_name)}
+    key = _exercise_key(exercise_name)
+    matches = [
+        r for r in get_sets_for_date(conn, day)
+        if r["exercise"].lower() in names or _exercise_key(r["exercise"]) == key
+    ]
+    if not matches:
+        return None, {"error": f"no '{exercise_name}' logged on {day}"}
+    if len(matches) > 1:
+        return None, {
+            "candidates": [_set_view(r) for r in matches],
+            "message": "more than one entry matches — ask Ollie which one, then retry with its log_id",
+        }
+    return matches[0], None
+
+
+_UNSET = object()  # distinguishes "not given" from an explicit null (bodyweight)
+
+
+async def correct_exercise_log(
+    conn: sqlite3.Connection,
+    log_id: int | None = None,
+    exercise_name: str = "",
+    date: str | None = None,
+    new_exercise_name: str | None = None,
+    sets: int | None = None,
+    reps: int | None = None,
+    weight_kg=_UNSET,
+    warmup_kg=_UNSET,
+    notes: str | None = None,
+) -> dict:
+    """Fix one logged exercise in place — only the fields given change."""
+    try:
+        row, reply = _find_logged_set(conn, log_id, exercise_name, date)
+        if reply is not None:
+            return reply
+
+        changes: dict = {}
+        if new_exercise_name:
+            changes["exercise"] = new_exercise_name
+        if sets is not None:
+            changes["sets"] = sets
+        if reps is not None:
+            changes["reps"] = reps
+        if weight_kg is not _UNSET:
+            changes["weight_kg"] = weight_kg
+        if warmup_kg is not _UNSET:
+            changes["warmup_kg"] = warmup_kg
+        if notes is not None:
+            changes["notes"] = notes
+        if not changes:
+            return {"error": "nothing to change — give at least one new value"}
+
+        update_exercise_set(conn, row["id"], changes)
+        after = get_set_by_id(conn, row["id"])
+        return {
+            "updated": True,
+            "date": row["date"],
+            "before": _set_view(row),
+            "after": _set_view(after),
+        }
+    except Exception as exc:
+        logger.warning("correct_exercise_log failed: %s", exc)
+        return {"error": str(exc)}
+
+
+async def delete_exercise_log(
+    conn: sqlite3.Connection,
+    log_id: int | None = None,
+    exercise_name: str = "",
+    date: str | None = None,
+) -> dict:
+    """Remove one logged exercise — for a duplicate or something that was
+    never meant to be logged. Never guesses between several matches."""
+    try:
+        row, reply = _find_logged_set(conn, log_id, exercise_name, date)
+        if reply is not None:
+            return reply
+
+        session_removed = delete_exercise_set(conn, row["id"])
+        return {
+            "deleted": True,
+            "date": row["date"],
+            "removed": _set_view(row),
+            "session_removed": session_removed,
+        }
+    except Exception as exc:
+        logger.warning("delete_exercise_log failed: %s", exc)
         return {"error": str(exc)}
 
 
@@ -489,13 +715,17 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "log_exercises",
             "description": (
-                "Log one or more completed exercises to today's gym session in a SINGLE "
-                "call. Always pass every exercise mentioned in the user's message as one "
-                "list — even a single exercise is a 1-item list. E.g. for 'bench 80kg 5x5, "
-                "OHP s40 52.5kg 4x8' pass two items in one call — never split a "
-                "multi-exercise message into separate calls, that silently drops "
-                "exercises. Automatically appends to today's open session if one exists "
-                "(see open_session_today in the ambient context), or starts a new one."
+                "Log one or more exercises Ollie has COMPLETED, to today's gym session, in a "
+                "SINGLE call. Only call this when he reports doing them — never for a "
+                "question ('what did I do on X last time?', 'what weight for X?') or a plan. "
+                "Pass only the exercises from his latest message — never re-send ones from "
+                "earlier messages; they're already logged (see open_session_today / "
+                "session_so_far). Every exercise in the message goes in one list — even a "
+                "single exercise is a 1-item list; e.g. 'DB bench 30kg 3x8, pec fly 50kg "
+                "3x8' is one call with two items. Appends to today's session or starts one. "
+                "Returns session_so_far (everything logged today, with log_ids) — use it to "
+                "show the whole session — and skipped_duplicates for items identical to one "
+                "already logged today, which were NOT written again."
             ),
             "parameters": {
                 "type": "object",
@@ -542,14 +772,87 @@ TOOL_SCHEMAS: list[dict] = [
                         "type": ["string", "null"],
                         "enum": ["push", "pull", "legs", "short", "run", None],
                         "description": (
-                            "Only set this when starting a brand-new session today and the type "
-                            "isn't already clear from ambient context. Infer from the exercises: "
-                            "bench/OHP/dips/flyes -> push; rows/pull-ups/curls/face pulls -> pull; "
-                            "squats/RDLs/lunges/leg press -> legs."
+                            "Set this whenever the type is clear — infer it from the exercises "
+                            "(dips/presses/flyes/raises/tricep work -> push; rows/pull-ups/curls/"
+                            "face pulls/delt fly -> pull; squats/RDLs/lunges/leg press -> legs). "
+                            "It decides which of today's sessions these join: 'run' (run-strength/"
+                            "prehab work) joins today's run session; push/pull/legs/short join "
+                            "today's gym session — a run and gym work on the same day stay "
+                            "separate sessions, different gym types on one day merge."
+                        ),
+                    },
+                    "allow_duplicates": {
+                        "type": "boolean",
+                        "description": (
+                            "Only true when Ollie confirms he genuinely did an identical extra "
+                            "entry (after a previous call reported it in skipped_duplicates)."
                         ),
                     },
                 },
                 "required": ["exercises"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "correct_exercise_log",
+            "description": (
+                "Fix an exercise already logged — wrong weight/sets/reps/name, e.g. "
+                "'that pec fly was 55kg not 50'. Only the fields you pass change. Prefer "
+                "log_id (from session_so_far or a [done: ...] note) since it's exact. With "
+                "only a name, several matches come back as candidates instead of an edit — "
+                "ask Ollie which one. Works on earlier days via date. Never use "
+                "log_exercises to 'fix' a log — that adds a second entry."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "log_id": {"type": ["integer", "null"], "description": "Exact entry id, if known."},
+                    "exercise_name": {
+                        "type": "string",
+                        "description": "Name to match, only used if log_id is omitted.",
+                    },
+                    "date": {
+                        "type": ["string", "null"],
+                        "description": "YYYY-MM-DD the entry was logged on. Omit for today.",
+                    },
+                    "new_exercise_name": {"type": ["string", "null"], "description": "Rename the entry."},
+                    "sets": {"type": ["integer", "null"]},
+                    "reps": {"type": ["integer", "null"]},
+                    "weight_kg": {"type": ["number", "null"], "description": "New weight; null = bodyweight."},
+                    "warmup_kg": {"type": ["number", "null"]},
+                    "notes": {"type": ["string", "null"]},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_exercise_log",
+            "description": (
+                "Remove a logged exercise entirely — a duplicate, or something logged by "
+                "mistake ('delete that', 'I didn't do the face pulls'). NEVER use this to "
+                "fix a wrong value — that's correct_exercise_log. Prefer log_id. With only "
+                "a name, several matches come back as candidates and nothing is deleted — "
+                "ask Ollie which one. Works on earlier days via date."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "log_id": {"type": ["integer", "null"], "description": "Exact entry id, if known."},
+                    "exercise_name": {
+                        "type": "string",
+                        "description": "Name to match, only used if log_id is omitted.",
+                    },
+                    "date": {
+                        "type": ["string", "null"],
+                        "description": "YYYY-MM-DD the entry was logged on. Omit for today.",
+                    },
+                },
+                "required": [],
             },
         },
     },
@@ -583,8 +886,9 @@ TOOL_SCHEMAS: list[dict] = [
             "name": "get_exercise_history",
             "description": (
                 "Get the recent logged history for one specific exercise across sessions, "
-                "newest first. Use this for progressive-overload questions about a single "
-                "movement, e.g. 'how's my bench progressing'."
+                "newest first. Use this for 'what did I do on X last time?', including for "
+                "an exercise Ollie is swapping in today, and for progress questions like "
+                "'how's my bench progressing'. Read-only — asking never logs anything."
             ),
             "parameters": {
                 "type": "object",

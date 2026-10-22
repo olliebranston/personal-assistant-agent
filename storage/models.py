@@ -176,6 +176,74 @@ def get_recent_sessions(
     return result
 
 
+def get_sets_for_date(conn: sqlite3.Connection, date: str) -> list[dict]:
+    """Every exercise_sets row logged on a date, with its session's type, in log order.
+
+    Used by correct_exercise_log/delete_exercise_log to find the entry Ollie
+    means, and by log_exercises to spot a re-sent duplicate.
+    """
+    rows = conn.execute(
+        """SELECT es.*, gs.date, gs.session_type
+             FROM exercise_sets es
+             JOIN gym_sessions gs ON es.session_id = gs.id
+            WHERE gs.date = ?
+            ORDER BY es.id""",
+        (date,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_set_by_id(conn: sqlite3.Connection, set_id: int) -> dict | None:
+    row = conn.execute(
+        """SELECT es.*, gs.date, gs.session_type
+             FROM exercise_sets es
+             JOIN gym_sessions gs ON es.session_id = gs.id
+            WHERE es.id = ?""",
+        (set_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+_EDITABLE_SET_FIELDS = ("exercise", "weight_kg", "warmup_kg", "sets", "reps", "notes")
+
+
+def update_exercise_set(conn: sqlite3.Connection, set_id: int, changes: dict) -> None:
+    """Update the given columns of one exercise_sets row (keys outside
+    _EDITABLE_SET_FIELDS are rejected rather than interpolated into SQL)."""
+    unknown = set(changes) - set(_EDITABLE_SET_FIELDS)
+    if unknown:
+        raise ValueError(f"not editable: {', '.join(sorted(unknown))}")
+    if not changes:
+        return
+    assignments = ", ".join(f"{col} = ?" for col in changes)
+    conn.execute(f"UPDATE exercise_sets SET {assignments} WHERE id = ?", (*changes.values(), set_id))
+    conn.commit()
+
+
+def delete_exercise_set(conn: sqlite3.Connection, set_id: int) -> bool:
+    """Delete one exercise_sets row. If that leaves its session with no
+    exercises, the session row goes too — an empty session would otherwise
+    still count as a workout in the PPL rotation. Returns whether the session
+    was removed."""
+    row = conn.execute("SELECT session_id FROM exercise_sets WHERE id = ?", (set_id,)).fetchone()
+    if row is None:
+        return False
+    session_id = row["session_id"]
+    conn.execute("DELETE FROM exercise_sets WHERE id = ?", (set_id,))
+    remaining = conn.execute(
+        "SELECT COUNT(*) AS c FROM exercise_sets WHERE session_id = ?", (session_id,)
+    ).fetchone()["c"]
+    session_removed = False
+    if remaining == 0:
+        # A run session's run_logs live in their own table, so a "run"
+        # session with no exercise rows is normal — never delete those.
+        session_removed = conn.execute(
+            "DELETE FROM gym_sessions WHERE id = ? AND session_type != 'run'", (session_id,)
+        ).rowcount > 0
+    conn.commit()
+    return session_removed
+
+
 def insert_run(conn: sqlite3.Connection, run: RunLog) -> int:
     """Insert a run log row and return its new id."""
     cur = conn.execute(

@@ -74,6 +74,25 @@ async def test_log_run_appends_to_already_open_session_today():
     assert session_count == 1
 
 
+@pytest.mark.asyncio
+async def test_log_run_does_not_join_todays_gym_session():
+    # Ollie's rule (Oct 2026): a run and a gym session on the same day are
+    # separate sessions, so the run still fills its own rotation slot.
+    conn = _make_conn()
+    conn.execute(
+        "INSERT INTO gym_sessions (date, session_type, notes) VALUES (?, 'push', '')",
+        (date.today().isoformat(),),
+    )
+    conn.commit()
+
+    result = await log_run(conn, run_type="easy", distance_km=5.0, duration_min=30.0)
+
+    row = conn.execute("SELECT * FROM gym_sessions WHERE id = ?", (result["session_id"],)).fetchone()
+    assert row["session_type"] == "run"
+    session_count = conn.execute("SELECT COUNT(*) AS c FROM gym_sessions").fetchone()["c"]
+    assert session_count == 2
+
+
 # ── get_recent_runs ──────────────────────────────────────────────────────────
 
 

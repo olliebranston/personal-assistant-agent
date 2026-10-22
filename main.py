@@ -37,8 +37,9 @@ something wasn't great.
 GYM KNOWLEDGE (static facts — don't call a tool for these)
 - PPL split: Push = chest, shoulders, triceps. Pull = back, biceps, rear \
 delts. Legs = quads, hamstrings, glutes, calves.
-- Exercise -> session type: bench press, OHP, dips, flyes -> push. Rows, \
-pull-ups, curls, face pulls -> pull. Squats, RDLs, lunges, leg press -> legs.
+- Exercise -> session type: dips, DB bench press, pec fly, machine raises, \
+tricep extensions, rope pulldowns -> push. Pull-ups, rows, delt fly, face \
+pulls, curls, rope pull-ups -> pull. Squats, RDLs, lunges, leg press -> legs.
 - Progression rule: sets x reps advance through a fixed 4-step cycle at a \
 given weight — 3x8 -> 3x10 -> 4x8 -> 4x10. Completing 4x10 bumps weight by \
 +2.5kg and resets to 3x8 at the new weight (a single off session doesn't \
@@ -58,9 +59,20 @@ never split a multi-exercise message into separate calls, e.g. "bench 80kg \
 calls. "sXX" or "warm-up set of Xkg" notation maps to that item's \
 warmup_kg (e.g. "s40 70kg 5x8" -> warmup_kg=40, weight_kg=70) — leave it \
 null if no warm-up was mentioned.
-- Session grouping: if open_session_today is set in the ambient context, \
-any exercises logged now belong to that same session — don't ask, don't \
-start a new one. log_exercises handles this automatically.
+- Session grouping: log_exercises files exercises into today's session \
+itself — always pass session_type. A run and gym work on the same day are \
+separate sessions; different gym types on one day merge. Don't ask.
+- Log ONLY what Ollie says he has just done, and only from his latest \
+message. Never re-log anything already in open_session_today, \
+session_so_far or an "Already done" note — it's logged. A question \
+("what did I do on X last time?", "what weight for X?") or a swap \
+("doing delt fly instead of face pulls") logs nothing: answer with \
+get_exercise_history / get_exercise_progression for that exercise.
+- After logging, show the whole session so far (session_so_far), not just \
+this message's items. If skipped_duplicates is non-empty, say those were \
+already logged; only use allow_duplicates if Ollie confirms a genuine repeat.
+- Mistakes: fix with correct_exercise_log, remove with \
+delete_exercise_log (prefer log_id) — never log again to "fix" something.
 
 RUNNING KNOWLEDGE (static facts — don't call a tool for these)
 - Goals: sub-20 5k by end of 2026 (current PB 24:30), London Marathon \
@@ -371,6 +383,13 @@ async def _handle_tool_calling(update: Update, context, text: str) -> None:
 
     memory.add(user_id, "user", text)
     memory.add(user_id, "assistant", reply)
+    if registry.actions:
+        # Memory is otherwise text-only, so the next turn couldn't tell what
+        # was already logged and sometimes logged it again — record it.
+        memory.add(
+            user_id, "system",
+            "Already done for the message above (don't repeat): " + "; ".join(registry.actions),
+        )
     await reply_formatted(update.message, reply)
 
 

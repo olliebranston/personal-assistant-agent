@@ -57,7 +57,7 @@ in `tools/gym.py:_SESSION_PLANS`, not left to the LLM to infer per session):
    push starts with dips, pull starts with pull-ups, legs starts with
    squats/Bulgarian split squats.
 2. **Then the rest of the compound, multi-muscle movements**, most
-   challenging/most-muscle-groups first (e.g. bench press, bent over bar
+   challenging/most-muscle-groups first (e.g. DB bench press, bent over DB
    rows, Romanian deadlifts, leg press) — before any isolation work.
 3. **Isolation exercises last.** Within the isolation tail, group by
    equipment where more than one isolation exercise shares it (e.g. two
@@ -67,25 +67,24 @@ in `tools/gym.py:_SESSION_PLANS`, not left to the LLM to infer per session):
 
 ### Push — Chest, Shoulders, Triceps
 
-**Fixed session order, exactly as `tools/gym.py:_SESSION_PLANS["push"]`
-enforces it (this is what `get_session_plan` actually returns — see the
-note under Exercise Library below for how the wider options here relate
-to it):**
+**Standard session (Ollie, Oct 2026), exactly as
+`tools/gym.py:_SESSION_PLANS["push"]` returns it via `get_session_plan`.**
+Targets come from logged history (progression); the sets×reps shown are
+only the fallback for an exercise with no history yet. Swapping exercises
+in or out on the day is fine — this is the default, not a constraint.
 1. Dips — 4×10
-2. Bench press — 5×8 (working weight: ~60–70kg, target: 100kg)
-3. Overhead press — 4×8
-4. One chest isolation exercise (rotate — pick from the list below) — 4×8
-5. Dumbbell lateral raises — 4×15 ← natural 15+ rep set
-6. Rope pulldowns — 4×8–10
+2. DB bench press (flat; also logged as "DB press", "DB bench") — 3×8
+3. Pec fly — 3×8
+4. Machine raises (machine lateral raises) — 3×8
+5. Overhead tricep extensions (also logged as "overhead rope extensions") — 3×8
+6. Rope pulldowns — 3×8
 
-**Chest isolation rotation (pick 1 for slot 4):**
-- Pec fly machine — 4×8
-- Cable pec fly — 3×10
-- Incline dumbbell bench — 4×8
-- Close-grip dumbbell bench — 4×8
+Logged-name variants are matched by `_EXERCISE_ALIAS_GROUPS` in
+`tools/gym.py`, so history logged under any of them reaches the plan.
 
-**Other options — history/variety, not part of the fixed 6-slot rotation
-above:**
+**Other options — swap in on the day:**
+- Cable pec fly, incline dumbbell bench, close-grip dumbbell bench
+- Barbell bench press (target: 100kg), overhead press
 - Chest press machine
 - Cable/machine lateral raises — 3×10 (rotate with DB raises)
 - Skullcrushers — 4×8
@@ -95,6 +94,18 @@ above:**
 ---
 
 ### Pull — Back, Biceps, Rear Delts
+
+**Standard session (Ollie, Oct 2026), exactly as
+`tools/gym.py:_SESSION_PLANS["pull"]` returns it** (same rules as push:
+history drives targets, 3×8 is only the no-history fallback, swaps fine):
+1. Pull-ups — 4×5–8
+2. Bent over DB rows (also logged as "DB bent over rows", "bent over rows") — 3×8
+3. Delt fly — 3×8
+4. Face pulls — 3×8
+5. Incline DB bicep curls (also logged as "incline DB curls") — 3×8
+6. Rope pull-ups — 3×8
+
+**Wider options to swap in on the day:**
 
 **Vertical pulls:**
 - Pull-ups / chin-ups — 4×5–8

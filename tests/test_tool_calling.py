@@ -289,10 +289,33 @@ def test_build_ambient_context_open_session_today():
 
     ctx = build_ambient_context(conn)
 
-    assert ctx["open_session_today"] == {"session_type": "push", "session_id": session_id}
+    assert ctx["open_session_today"] == {"session_type": "push", "session_id": session_id, "exercises": []}
     assert ctx["last_workout"] == {"date": today, "session_type": "push"}
     # A push/pull/legs session today -> weights-day target
     assert ctx["daily_macros"]["kcal_target"] == CALORIE_TARGETS["weights"]
+
+    conn.close()
+
+
+def test_build_ambient_context_open_session_lists_logged_exercises_gym_first():
+    # The model re-sent earlier messages' exercises because it couldn't see
+    # what was already logged; the ambient block now shows it, with log_ids.
+    conn = _make_conn()
+    today = _today()
+    conn.execute("INSERT INTO gym_sessions (date, session_type, notes) VALUES (?, 'run', '')", (today,))
+    conn.execute("INSERT INTO gym_sessions (date, session_type, notes) VALUES (?, 'pull', '')", (today,))
+    pull_id = conn.execute("SELECT id FROM gym_sessions WHERE session_type = 'pull'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO exercise_sets (session_id, exercise, weight_kg, sets, reps) VALUES (?, 'face pulls', 20, 3, 10)",
+        (pull_id,),
+    )
+    conn.commit()
+
+    session = build_ambient_context(conn)["open_session_today"]
+
+    assert session["session_type"] == "pull"
+    assert [e["exercise"] for e in session["exercises"]] == ["face pulls"]
+    assert isinstance(session["exercises"][0]["log_id"], int)
 
     conn.close()
 
