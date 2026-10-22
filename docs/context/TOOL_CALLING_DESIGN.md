@@ -99,11 +99,13 @@ Which of today's sessions it joins (Ollie's rule, Oct 2026): `session_type="run"
 today's non-run session, so a run and gym work on one day stay separate
 while different gym types merge; `null` appends to today's latest session.
 Otherwise a new session is created (type from `session_type` or the
-PPL-cycle fallback). An item identical to one already in the session (same
-exercise after aliases, weight, sets, reps) is skipped unless
-`allow_duplicates` — the model had been re-sending earlier messages'
-exercises on follow-ups.
-**Returns:** `{"logged": bool, "session_id": int|null, "session_type": str, "exercises": [{"log_id": int, "exercise": str, "sets": int, "reps": int, "weight_kg": float|null, "warmup_kg": float|null, "notes": str|null}], "skipped_duplicates": [...], "session_so_far": [{"log_id", "exercise", "sets", "reps", "weight_kg"}], "note"?: str}` or `{"error": str}` (every item validated before any write, so a malformed item writes nothing rather than partially logging).
+PPL-cycle fallback). An exercise already in the session (same exercise
+after aliases) isn't written again unless `allow_duplicates`: identical
+items land in `skipped_duplicates`, ones with different numbers in
+`needs_confirmation` (Ollie says correction or extra work) — the model had
+been re-sending earlier messages' exercises, and logging corrections or the
+day's plan as new rows (VM data, Sept 2026).
+**Returns:** `{"logged": bool, "session_id": int|null, "session_type": str, "exercises": [{"log_id": int, "exercise": str, "sets": int, "reps": int, "weight_kg": float|null, "warmup_kg": float|null, "notes": str|null}], "skipped_duplicates": [...], "needs_confirmation": [{..., "already_logged": {...}}], "session_so_far": [{"log_id", "exercise", "sets", "reps", "weight_kg"}], "note"?: str}` or `{"error": str}` (every item validated before any write, so a malformed item writes nothing rather than partially logging).
 
 #### `correct_exercise_log(log_id | exercise_name, date?, new_exercise_name?, sets?, reps?, weight_kg?, warmup_kg?, notes?) -> dict`
 
@@ -168,23 +170,30 @@ copying these verbatim rather than the model re-summing figures itself,
 since that hand-arithmetic was the root cause of a real "today's total"
 bug.
 
-#### `log_food(food_name: str, grams: float, meal_slot: str | null = null) -> dict`
+#### `log_food(food_name: str, grams: float, meal_slot: str | null = null, allow_duplicate: bool = false) -> dict`
 
-Writes immediately — no confirmation step (§5.1's recommendation, adopted).
+Writes immediately — no confirmation step (§5.1's recommendation, adopted) —
+except that the same food at the same grams already in that slot today is
+held, returning `{"logged": false, "possible_duplicate": true, "existing":
+{...}, "message": str}`, unless `allow_duplicate` (the VM log showed whole
+meals re-logged on a follow-up message; there's no timestamp column, so
+"same slot, same day" is the window). Items logged earlier in the same
+message don't count — the registry binds a per-turn `turn_logged_ids` set.
 **Returns:** `{"logged": true, "id": int, "food_name": str, "grams": float, "protein_g": float, "kcal": float, "source": "usda"|"reference"|"user_defined"|"estimated", "meal_slot": str, "daily_totals": {...macros vs target, see get_daily_macros...}, "turn_totals": {"protein_g": float, "kcal": float, "summary_line": str}|null, "needs_input"?: true}`
 
-#### `correct_food_log(food_name: str = "", field: "quantity_g"|"protein_g" = "quantity_g", new_value: float = 0) -> dict`
+#### `correct_food_log(food_name: str = "", field: "quantity_g"|"protein_g"|"kcal" = "quantity_g", new_value: float = 0, log_id: int | null = null, date: str | null = null) -> dict`
 
-Fixes a value on an entry already logged **today** — it has no date
-parameter and cannot reach a prior day's log. Matches `food_name` as a
-substring against today's entries (empty string = most recent). Edits one
-row in place; never removes a row (see `delete_food_log` for that).
-**Returns:** `{"updated": true, "before": {...}, "after": {...}, "daily_totals": {...}}` or `{"error": str}`.
+Fixes a value on an entry already logged — today by default, or `date`'s.
+Targets `log_id` exactly, else matches `food_name` as a substring (empty
+string = most recent). Edits one row in place; never removes a row (see
+`delete_food_log` for that). A `protein_g` above the entry's own weight is
+rejected (the VM log had "220g salmon" at 880g protein).
+**Returns:** `{"updated": true, "date": str, "before": {...}, "after": {...}, "daily_totals": {...}}` or `{"error": str}`.
 
-#### `delete_food_log(log_id: int | null = null, food_name: str = "") -> dict`
+#### `delete_food_log(log_id: int | null = null, food_name: str = "", date: str | null = null) -> dict`
 
 Removes an entry entirely — for a duplicate or mistaken log, never for
-fixing a value. Prefer `log_id` (exact); if only `food_name` is given and
+fixing a value. Today by default, or `date`'s. Prefer `log_id` (exact); if only `food_name` is given and
 more than one entry matches, this returns the candidates and deletes
 nothing rather than guessing.
 **Returns:** `{"deleted": true, "removed": {...}, "daily_totals": {...}}` or `{"error": str, "candidates"?: [...]}`.

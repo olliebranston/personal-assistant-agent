@@ -159,12 +159,32 @@ def test_free_transfers_paid_hit_does_not_consume_banked_transfers():
     assert compute_free_transfers(history) == 1
 
 
-def test_free_transfers_wildcard_gw_accrues_without_consuming():
+def test_free_transfers_wildcard_gw_keeps_the_balance_without_adding_one():
+    # Corrected Oct 2026: this test used to expect 2 (the chip week accruing
+    # +1 as if no transfers were made). Ollie's real history only matches the
+    # FPL app if a Wildcard/Free Hit week keeps the saved balance unchanged —
+    # see test_free_transfers_matches_the_app_for_ollies_real_2026_history.
     history = [
         {"gw": 1, "transfers": 0, "transfer_cost": 0, "chip": None},
         {"gw": 2, "transfers": 15, "transfer_cost": 0, "chip": "wildcard"},
     ]
-    assert compute_free_transfers(history) == 2  # unaffected by the 15 wildcard transfers
+    assert compute_free_transfers(history) == 1  # unaffected by the 15 wildcard transfers
+
+
+def test_free_transfers_matches_the_app_for_ollies_real_2026_history():
+    # entry_history for GW1-7 as fetched from the public API on 22 Oct 2026
+    # (transfers, cost, chip); the FPL app showed 1 free transfer for GW8.
+    # Robin said 2 because it added one for the GW6 wildcard week.
+    history = [
+        {"gw": 1, "transfers": 0, "transfer_cost": 0, "chip": None},
+        {"gw": 2, "transfers": 0, "transfer_cost": 0, "chip": None},
+        {"gw": 3, "transfers": 1, "transfer_cost": 0, "chip": "3xc"},
+        {"gw": 4, "transfers": 0, "transfer_cost": 0, "chip": None},
+        {"gw": 5, "transfers": 2, "transfer_cost": 0, "chip": None},
+        {"gw": 6, "transfers": 0, "transfer_cost": 0, "chip": "wildcard"},
+        {"gw": 7, "transfers": 2, "transfer_cost": 0, "chip": None},
+    ]
+    assert compute_free_transfers(history) == 1
 
 
 # ── chips_used_by_set / active_chip_set ─────────────────────────────────────────
@@ -229,10 +249,15 @@ def _patch_client(monkeypatch):
     async def _fixtures(gw=None):
         return []
 
+    async def _transfers(team_id):
+        # Saka (id 100, now £10.0m) bought at £9.0m -> sells for £9.5m.
+        return [{"element_in": 100, "element_in_cost": 90, "time": "2026-09-01T00:00:00Z"}]
+
     monkeypatch.setattr(fpl_tools.fpl_client, "bootstrap", _bootstrap)
     monkeypatch.setattr(fpl_tools.fpl_client, "entry_history", _entry_history)
     monkeypatch.setattr(fpl_tools.fpl_client, "league", _league)
     monkeypatch.setattr(fpl_tools.fpl_client, "fixtures", _fixtures)
+    monkeypatch.setattr(fpl_tools.fpl_client, "transfers", _transfers)
 
 
 @pytest.mark.asyncio
@@ -265,6 +290,23 @@ async def test_get_fpl_squad_with_synced_picks_flags_injured_player(_patch_clien
     assert result["squad_gw"] == 1
     assert len(result["flagged_players"]) == 1
     assert result["flagged_players"][0]["name"] == "Raya"
+
+
+@pytest.mark.asyncio
+async def test_get_fpl_squad_shows_sell_price_and_labels_the_bank(_patch_client):
+    # Ollie (22 Oct 2026): "player prices and sell values ... are wrong" — the
+    # squad only ever showed market price, never what a player sells for.
+    conn = _make_conn()
+    replace_my_picks(conn, 1, [
+        {"element_id": 100, "position": 1, "is_captain": 1, "is_vice": 0, "multiplier": 2},
+    ])
+
+    result = await get_fpl_squad(conn)
+
+    saka = result["squad"][0]
+    assert saka["price"] == 10.0
+    assert saka["sell_price"] == 9.5  # half the 1.0m rise, rounded down
+    assert "deadline" in result["bank_note"]
 
 
 @pytest.mark.asyncio

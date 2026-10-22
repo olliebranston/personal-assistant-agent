@@ -159,6 +159,8 @@ async def log_food(
     grams: float,
     meal_slot: str | None = None,
     turn_totals: dict | None = None,
+    allow_duplicate: bool = False,
+    turn_logged_ids: set[int] | None = None,
 ) -> dict:
     """Look up macros for a food and write it to today's log immediately (§5.1).
 
@@ -166,12 +168,38 @@ async def log_food(
     message by tools/registry.py — never part of the LLM-facing schema — used
     to accumulate an exact "this turn" total across multiple log_food calls
     without the model having to re-sum them itself.
+
+    The same food at the same grams already logged in the same slot today is
+    held (possible_duplicate) rather than written, unless allow_duplicate:
+    the VM log showed whole meals logged again on a follow-up message. Items
+    logged earlier in *this* message (turn_logged_ids, also registry-bound)
+    don't count — one message can mention the same item twice. There's no
+    timestamp column, so "same slot, same day" is the duplicate window.
     """
     try:
         slot = meal_slot or "other"
-        macros = await _lookup_with_user_override(conn, food_name, grams)
-
         today = _today().isoformat()
+
+        if not allow_duplicate:
+            same = next((
+                e for e in get_food_logs_for_date(conn, today)
+                if e["meal_slot"] == slot
+                and (e["food_name"] or "").lower() == food_name.lower()
+                and e["grams"] is not None and abs(e["grams"] - grams) < 0.5
+                and e["id"] not in (turn_logged_ids or set())
+            ), None)
+            if same is not None:
+                return {
+                    "logged": False,
+                    "possible_duplicate": True,
+                    "existing": {"id": same["id"], "description": same["description"], "meal_slot": slot},
+                    "message": (
+                        "already logged in this slot today — NOT logged again. Ask Ollie if this "
+                        "is a second portion (then log_food with allow_duplicate=true)."
+                    ),
+                }
+
+        macros = await _lookup_with_user_override(conn, food_name, grams)
         description = f"{grams:.0f}g {food_name}"
         log_id = insert_food_log(conn, FoodLog(
             date=today,
@@ -183,6 +211,8 @@ async def log_food(
             food_name=food_name,
             source=macros["source"],
         ))
+        if turn_logged_ids is not None:
+            turn_logged_ids.add(log_id)
 
         result = {
             "logged": True,
@@ -262,21 +292,29 @@ async def correct_food_log(
     food_name: str = "",
     field: str = "quantity_g",
     new_value: float = 0,
+    log_id: int | None = None,
+    date: str | None = None,
 ) -> dict:
-    """Correct today's most recent matching food log entry.
+    """Correct one food log entry — today's by default, or `date`'s.
 
-    food_name matches as a substring against today's entries (case-insensitive);
-    empty string matches the most recent entry. field is 'quantity_g' (re-runs
-    USDA lookup at the new gram amount) or 'protein_g' (sets protein directly).
+    log_id targets an entry exactly; otherwise food_name matches as a
+    substring (case-insensitive), and an empty food_name matches the most
+    recent entry. field is 'quantity_g' (re-runs the lookup at the new gram
+    amount), 'protein_g' or 'kcal' (set directly). A protein value above the
+    entry's own weight is rejected — the VM log had "220g salmon" at 880g.
     """
     try:
-        today = _today().isoformat()
-        logs = get_food_logs_for_date(conn, today)
+        day = date or _today().isoformat()
+        logs = get_food_logs_for_date(conn, day)
         if not logs:
-            return {"error": "no food logged today"}
+            return {"error": f"no food logged on {day}"}
 
         target = None
-        if food_name:
+        if log_id is not None:
+            target = next((entry for entry in logs if entry["id"] == log_id), None)
+            if target is None:
+                return {"error": f"no entry with id {log_id} logged on {day}"}
+        elif food_name:
             needle = food_name.lower()
             for entry in reversed(logs):
                 if needle in entry["description"].lower():
@@ -311,6 +349,12 @@ async def correct_food_log(
             }
         elif field == "protein_g":
             new_protein = round(float(new_value), 1)
+            grams = target["grams"] or _grams_from_description(target["description"])
+            if grams and new_protein > grams:
+                return {"error": (
+                    f"{new_protein:g}g protein is more than the {grams:g}g entry weighs — "
+                    "check the number with Ollie"
+                )}
             update_food_log(conn, target["id"], new_protein, target["kcal"])
             after = {
                 "id": target["id"],
@@ -318,14 +362,24 @@ async def correct_food_log(
                 "protein_g": new_protein,
                 "kcal": target["kcal"],
             }
+        elif field == "kcal":
+            new_kcal = round(float(new_value), 0)
+            update_food_log(conn, target["id"], target["protein_g"], new_kcal)
+            after = {
+                "id": target["id"],
+                "description": target["description"],
+                "protein_g": target["protein_g"],
+                "kcal": new_kcal,
+            }
         else:
-            return {"error": f"unknown field: {field!r} (expected 'quantity_g' or 'protein_g')"}
+            return {"error": f"unknown field: {field!r} (expected 'quantity_g', 'protein_g' or 'kcal')"}
 
         return {
             "updated": True,
+            "date": day,
             "before": before,
             "after": after,
-            "daily_totals": _daily_macros_dict(conn, today),
+            "daily_totals": _daily_macros_dict(conn, day),
         }
     except Exception as exc:
         logger.warning("correct_food_log failed: %s", exc)
@@ -336,6 +390,7 @@ async def delete_food_log(
     conn: sqlite3.Connection,
     log_id: int | None = None,
     food_name: str = "",
+    date: str | None = None,
 ) -> dict:
     """Remove one food log entry entirely — for duplicates or mistaken
     entries, never for correcting a value (use correct_food_log for that).
@@ -345,17 +400,19 @@ async def delete_food_log(
     food_name is given and more than one of today's entries match, this
     deliberately does NOT guess: it returns the candidates instead of
     deleting anything, since guessing wrong on a delete is unrecoverable.
+    Works on today by default, or on `date` (a duplicate is often only
+    noticed the next day).
     """
     try:
-        today = _today().isoformat()
+        today = date or _today().isoformat()
         logs = get_food_logs_for_date(conn, today)
         if not logs:
-            return {"error": "no food logged today"}
+            return {"error": f"no food logged on {today}"}
 
         if log_id is not None:
             target = next((entry for entry in logs if entry["id"] == log_id), None)
             if target is None:
-                return {"error": f"no entry with id {log_id} logged today"}
+                return {"error": f"no entry with id {log_id} logged on {today}"}
         elif food_name:
             matches = [entry for entry in logs if _matches_at_word_start(food_name, entry["description"])]
             if not matches:
@@ -730,7 +787,11 @@ TOOL_SCHEMAS: list[dict] = [
                 "separate get_daily_macros call to report progress. If the result has "
                 "needs_input=true, no reliable data was found (logged as 0g/0kcal so it "
                 "doesn't block) — ask Ollie for protein/kcal per 100g and call "
-                "set_user_food_macros with his answer."
+                "set_user_food_macros with his answer. Only log foods from Ollie's latest "
+                "message — never re-log earlier messages' items (see any 'Already done' "
+                "note). If the result has possible_duplicate=true, the same food and amount "
+                "was already logged in that slot today and was NOT logged again — ask "
+                "whether it's a second portion before retrying with allow_duplicate=true."
             ),
             "parameters": {
                 "type": "object",
@@ -759,6 +820,13 @@ TOOL_SCHEMAS: list[dict] = [
                             "ask rather than guess."
                         ),
                     },
+                    "allow_duplicate": {
+                        "type": "boolean",
+                        "description": (
+                            "Only true when Ollie confirms a second portion after a "
+                            "possible_duplicate result."
+                        ),
+                    },
                 },
                 "required": ["food_name", "grams"],
             },
@@ -769,11 +837,13 @@ TOOL_SCHEMAS: list[dict] = [
         "function": {
             "name": "correct_food_log",
             "description": (
-                "Correct a food item already logged today — e.g. 'actually the yoghurt was "
-                "300g' or 'that chicken was more like 50g protein'. Matches food_name as a "
-                "substring against today's entries (case-insensitive); leave food_name empty "
-                "to correct the most recently logged item. Returns before/after macros and "
-                "the updated daily totals."
+                "Correct a food item already logged — e.g. 'actually the yoghurt was "
+                "300g', 'that chicken was more like 50g protein', 'the curry was 650 kcal'. "
+                "Prefer log_id when you have it (exact). Otherwise matches food_name as a "
+                "substring (case-insensitive); empty food_name corrects the most recent "
+                "item. Today by default; pass date for an earlier day. Never log the food "
+                "again to fix it — that double-counts. Returns before/after macros and the "
+                "updated totals for that day."
             ),
             "parameters": {
                 "type": "object",
@@ -782,18 +852,26 @@ TOOL_SCHEMAS: list[dict] = [
                         "type": "string",
                         "description": "Substring to match against today's logged entries, e.g. 'yoghurt'. Leave empty for the most recent entry.",
                     },
+                    "log_id": {
+                        "type": ["integer", "null"],
+                        "description": "The exact entry id to correct, if known.",
+                    },
+                    "date": {
+                        "type": ["string", "null"],
+                        "description": "YYYY-MM-DD the entry was logged on. Omit for today.",
+                    },
                     "field": {
                         "type": "string",
-                        "enum": ["quantity_g", "protein_g"],
+                        "enum": ["quantity_g", "protein_g", "kcal"],
                         "description": (
                             "'quantity_g' — correct the gram amount and re-run the nutrition lookup "
                             "at the new amount. 'protein_g' — set the protein value directly (e.g. "
-                            "user states an exact protein content)."
+                            "user states an exact protein content). 'kcal' — set the calories directly."
                         ),
                     },
                     "new_value": {
                         "type": "number",
-                        "description": "The corrected value — grams for 'quantity_g', grams of protein for 'protein_g'.",
+                        "description": "The corrected value — grams for 'quantity_g', grams of protein for 'protein_g', kcal for 'kcal'.",
                     },
                 },
                 "required": ["field", "new_value"],
@@ -812,7 +890,8 @@ TOOL_SCHEMAS: list[dict] = [
                 "recent log_food/get_food_log/correct_food_log result) since it's "
                 "exact. If you only have a name and more than one entry matches, "
                 "this returns the candidates instead of deleting anything — show "
-                "them to Ollie and ask which one rather than guessing."
+                "them to Ollie and ask which one rather than guessing. Today by "
+                "default; pass date to remove a duplicate from an earlier day."
             ),
             "parameters": {
                 "type": "object",
@@ -823,7 +902,11 @@ TOOL_SCHEMAS: list[dict] = [
                     },
                     "food_name": {
                         "type": "string",
-                        "description": "Substring to match against today's entries, only used if log_id is omitted.",
+                        "description": "Substring to match against the day's entries, only used if log_id is omitted.",
+                    },
+                    "date": {
+                        "type": ["string", "null"],
+                        "description": "YYYY-MM-DD the entry was logged on. Omit for today.",
                     },
                 },
                 "required": [],

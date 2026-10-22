@@ -626,6 +626,43 @@ async def test_log_exercises_skips_an_exercise_already_logged_identically_today(
 
 
 @pytest.mark.asyncio
+async def test_log_exercises_holds_an_exercise_already_logged_today_with_different_numbers():
+    # VM data (22 Oct audit): on 14 Sept and 26 Sept the whole push session
+    # was written a second time with *different* numbers (e.g. pec fly 3x8
+    # then 3x10; machine raises 4x15 with no weight — the old plan's target —
+    # then 59kg 4x8). Those were corrections or a plan logged as done, not
+    # extra work. Hold them and ask instead of writing a second row.
+    conn = _make_conn()
+    first = await log_exercises(conn, exercises=[
+        {"exercise_name": "pec fly", "sets": 3, "reps": 8, "weight_kg": 75.5},
+    ])
+
+    second = await log_exercises(conn, exercises=[
+        {"exercise_name": "pec fly", "sets": 3, "reps": 10, "weight_kg": 79.0},
+        {"exercise_name": "machine raises", "sets": 4, "reps": 8, "weight_kg": 59.0},
+    ])
+
+    assert [e["exercise"] for e in second["exercises"]] == ["machine raises"]
+    held = second["needs_confirmation"]
+    assert [h["exercise"] for h in held] == ["pec fly"]
+    assert held[0]["already_logged"]["log_id"] == first["exercises"][0]["log_id"]
+    assert len(get_recent_sessions(conn)[0]["sets"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_log_exercises_allow_duplicates_logs_a_held_extra_entry():
+    conn = _make_conn()
+    await log_exercises(conn, exercises=[{"exercise_name": "dips", "sets": 4, "reps": 10}])
+
+    result = await log_exercises(
+        conn, exercises=[{"exercise_name": "dips", "sets": 2, "reps": 15}], allow_duplicates=True,
+    )
+
+    assert len(result["exercises"]) == 1
+    assert result["needs_confirmation"] == []
+
+
+@pytest.mark.asyncio
 async def test_log_exercises_allow_duplicates_logs_a_genuine_repeat():
     conn = _make_conn()
     await log_exercises(conn, exercises=[{"exercise_name": "dips", "sets": 4, "reps": 10}])

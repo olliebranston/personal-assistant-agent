@@ -317,12 +317,14 @@ async def log_exercises(
     lose an item to the model choosing to call this fewer times than there
     were exercises (the previous one-exercise-per-call design's failure mode).
 
-    An item identical (same exercise after aliases, weight, sets and reps) to
-    one already in today's session is skipped and reported back in
-    skipped_duplicates unless allow_duplicates is set — the model has been
-    seen re-sending an earlier message's exercises on a follow-up, doubling
-    them up. The reply carries session_so_far, the whole session, so each
-    answer can show everything logged today rather than just this message.
+    An exercise already in today's session (same exercise after aliases) is
+    not written again unless allow_duplicates is set: an identical item is
+    reported in skipped_duplicates, one with different numbers is held in
+    needs_confirmation for Ollie to say whether it's a correction or extra
+    work. The model had been re-sending earlier messages' exercises — and
+    logging corrections or the day's plan as new rows — doubling sessions up.
+    The reply carries session_so_far, the whole session, so each answer can
+    show everything logged today rather than just this message.
     """
     try:
         if not exercises:
@@ -355,6 +357,7 @@ async def log_exercises(
 
         logged = []
         skipped = []
+        held = []
         for item in exercises:
             exercise_name = item["exercise_name"]
             sets = item["sets"]
@@ -363,13 +366,19 @@ async def log_exercises(
             warmup_kg = item.get("warmup_kg")
             notes = item.get("notes")
 
-            if not allow_duplicates and any(
-                _exercise_key(e["exercise"]) == _exercise_key(exercise_name)
-                and e["sets"] == sets and e["reps"] == reps
-                and _same_weight(e["weight_kg"], weight_kg)
-                for e in existing
-            ):
-                skipped.append({"exercise": exercise_name, "sets": sets, "reps": reps, "weight_kg": weight_kg})
+            same_exercise = [e for e in existing if _exercise_key(e["exercise"]) == _exercise_key(exercise_name)]
+            if same_exercise and not allow_duplicates:
+                as_given = {"exercise": exercise_name, "sets": sets, "reps": reps, "weight_kg": weight_kg}
+                if any(
+                    e["sets"] == sets and e["reps"] == reps and _same_weight(e["weight_kg"], weight_kg)
+                    for e in same_exercise
+                ):
+                    skipped.append(as_given)
+                else:
+                    # Already logged today with different numbers: in the
+                    # VM data this was a correction or a plan logged as done,
+                    # never genuine extra work — so ask rather than write.
+                    held.append({**as_given, "already_logged": _set_view(same_exercise[-1])})
                 continue
 
             if session_id is None:
@@ -405,9 +414,16 @@ async def log_exercises(
             "session_type": resolved_type,
             "exercises": logged,
             "skipped_duplicates": skipped,
+            "needs_confirmation": held,
             "session_so_far": session_so_far,
         }
-        if skipped and not logged:
+        if held:
+            result["note"] = (
+                "needs_confirmation items were NOT logged — each is already logged today with "
+                "different numbers. Ask Ollie: a correction (correct_exercise_log with that "
+                "log_id) or a genuine extra entry (log_exercises again with allow_duplicates)?"
+            )
+        elif skipped and not logged:
             result["note"] = "every exercise was already logged today — nothing new written"
         return result
     except Exception as exc:
@@ -724,8 +740,10 @@ TOOL_SCHEMAS: list[dict] = [
                 "single exercise is a 1-item list; e.g. 'DB bench 30kg 3x8, pec fly 50kg "
                 "3x8' is one call with two items. Appends to today's session or starts one. "
                 "Returns session_so_far (everything logged today, with log_ids) — use it to "
-                "show the whole session — and skipped_duplicates for items identical to one "
-                "already logged today, which were NOT written again."
+                "show the whole session. An exercise already logged today is NOT written "
+                "again: identical ones come back in skipped_duplicates; ones with different "
+                "numbers come back in needs_confirmation — ask Ollie whether it's a "
+                "correction (correct_exercise_log with that log_id) or genuine extra work."
             ),
             "parameters": {
                 "type": "object",
@@ -784,8 +802,9 @@ TOOL_SCHEMAS: list[dict] = [
                     "allow_duplicates": {
                         "type": "boolean",
                         "description": (
-                            "Only true when Ollie confirms he genuinely did an identical extra "
-                            "entry (after a previous call reported it in skipped_duplicates)."
+                            "Only true when Ollie confirms an exercise reported in "
+                            "skipped_duplicates or needs_confirmation really was extra work "
+                            "on top of what's logged, not a correction."
                         ),
                     },
                 },

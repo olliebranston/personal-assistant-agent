@@ -105,6 +105,10 @@ def _wired(monkeypatch):
     async def _transfers(team_id):
         return []
 
+    async def _picks(team_id, gw):
+        return None  # "can't confirm" — tests that need the squad check override this
+
+    monkeypatch.setattr(fpl_tools.fpl_client, "picks", _picks)
     monkeypatch.setattr(fpl_tools.fpl_client, "bootstrap", _bootstrap)
     monkeypatch.setattr(fpl_tools.fpl_client, "fixtures", _fixtures)
     monkeypatch.setattr(fpl_tools.fpl_client, "entry_history", _entry_history)
@@ -812,17 +816,42 @@ def test_cost_basis_missing_cost_change_start_defaults_to_no_drift():
 
 
 @pytest.mark.asyncio
-async def test_get_fpl_recommendation_refuses_when_reported_value_disagrees(monkeypatch, _wired):
+async def test_get_fpl_recommendation_still_recommends_after_prices_move(monkeypatch, _wired):
+    # VM, 22 Oct 2026: the old check compared today's prices with FPL's team
+    # value recorded at the last gameweek (computed 101.2m vs 100.8m) and
+    # refused — four times this season — purely because Ollie's players had
+    # risen 0.4m since. A price move is not a sync error.
     conn, bootstrap, fixtures = _wired
-    _seed_current_squad(conn, bootstrap)
+    squad = _seed_current_squad(conn, bootstrap)
+    now_cost = {e["id"]: e["now_cost"] for e in bootstrap["elements"]}
+    value_at_last_gw = sum(now_cost[eid] for eid in squad) + 5 - 4  # prices up 0.4m since
 
-    async def _bad_entry_history(team_id):
+    async def _entry_history(team_id):
         return {"current": [{"event": 1, "points": 60, "total_points": 60, "overall_rank": 100000,
-                              "bank": 5, "value": 1, "event_transfers": 0, "event_transfers_cost": 0}],
+                              "bank": 5, "value": value_at_last_gw, "event_transfers": 0,
+                              "event_transfers_cost": 0}],
                 "chips": []}
 
-    monkeypatch.setattr(fpl_tools.fpl_client, "entry_history", _bad_entry_history)
+    monkeypatch.setattr(fpl_tools.fpl_client, "entry_history", _entry_history)
+
+    result = await get_fpl_recommendation(conn)
+    assert "error" not in result, result.get("error")
+
+
+@pytest.mark.asyncio
+async def test_get_fpl_recommendation_refuses_when_synced_squad_differs_from_fpl(monkeypatch, _wired):
+    # What the money check was really guarding against: recommending off a
+    # squad that isn't the one FPL actually has for that gameweek.
+    conn, bootstrap, fixtures = _wired
+    squad = _seed_current_squad(conn, bootstrap)
+    stranger = next(e["id"] for e in bootstrap["elements"] if e["id"] not in squad)
+    fpl_squad = sorted(squad)[1:] + [stranger]
+
+    async def _picks(team_id, gw):
+        return {"picks": [{"element": eid} for eid in fpl_squad]}
+
+    monkeypatch.setattr(fpl_tools.fpl_client, "picks", _picks)
 
     result = await get_fpl_recommendation(conn)
     assert "error" in result
-    assert "sanity check failed" in result["error"]
+    assert "squad check failed" in result["error"]

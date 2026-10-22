@@ -319,7 +319,9 @@ async def test_delete_food_log_by_name_errors_when_ambiguous_and_deletes_nothing
     today = date.today().isoformat()
 
     await log_food(conn, food_name="protein bar", grams=60, meal_slot="snack")
-    await log_food(conn, food_name="protein bar", grams=60, meal_slot="snack")
+    # allow_duplicate: these tests need a duplicate already in the log, which
+    # log_food's own guard would otherwise (correctly) hold back.
+    await log_food(conn, food_name="protein bar", grams=60, meal_slot="snack", allow_duplicate=True)
 
     result = await delete_food_log(conn, food_name="protein bar")
 
@@ -335,7 +337,7 @@ async def test_delete_food_log_by_id_succeeds_even_with_duplicates_present():
     today = date.today().isoformat()
 
     first = await log_food(conn, food_name="protein bar", grams=60, meal_slot="snack")
-    await log_food(conn, food_name="protein bar", grams=60, meal_slot="snack")
+    await log_food(conn, food_name="protein bar", grams=60, meal_slot="snack", allow_duplicate=True)
 
     result = await delete_food_log(conn, log_id=first["id"])
 
@@ -557,3 +559,105 @@ async def test_get_weight_trend_returns_entries_newest_first():
     ]
     assert result["latest_weight_kg"] == 104.0
     assert result["trend_kg_per_week"] == 2.0
+
+
+# ── Duplicate guard + wider edits (22 Oct 2026 audit) ───────────────────────
+# VM data: whole meals were logged again on a follow-up message (14 Sept
+# breakfast twice; 1 Sept lunch three times), and edits only reached today.
+
+
+@pytest.mark.asyncio
+async def test_log_food_holds_the_same_food_already_logged_in_that_slot_today():
+    conn = _make_conn()
+    today = date.today().isoformat()
+    first = await log_food(conn, food_name="eggs", grams=150, meal_slot="breakfast")
+
+    again = await log_food(conn, food_name="eggs", grams=150, meal_slot="breakfast")
+
+    assert again["logged"] is False
+    assert again["possible_duplicate"] is True
+    assert again["existing"]["id"] == first["id"]
+    assert len(get_food_logs_for_date(conn, today)) == 1
+
+
+@pytest.mark.asyncio
+async def test_log_food_same_food_twice_within_one_message_is_allowed():
+    # One message can legitimately mention the same item twice; the guard is
+    # for re-logging on a *later* message.
+    conn = _make_conn()
+    turn_ids: set[int] = set()
+    await log_food(conn, food_name="oats", grams=100, meal_slot="breakfast", turn_logged_ids=turn_ids)
+
+    second = await log_food(conn, food_name="oats", grams=100, meal_slot="breakfast", turn_logged_ids=turn_ids)
+
+    assert second["logged"] is True
+
+
+@pytest.mark.asyncio
+async def test_log_food_allow_duplicate_logs_a_confirmed_repeat():
+    conn = _make_conn()
+    await log_food(conn, food_name="whey protein", grams=30, meal_slot="shake")
+
+    again = await log_food(conn, food_name="whey protein", grams=30, meal_slot="shake", allow_duplicate=True)
+
+    assert again["logged"] is True
+
+
+@pytest.mark.asyncio
+async def test_log_food_same_food_in_a_different_slot_is_not_a_duplicate():
+    conn = _make_conn()
+    await log_food(conn, food_name="eggs", grams=150, meal_slot="breakfast")
+
+    lunch = await log_food(conn, food_name="eggs", grams=150, meal_slot="lunch")
+
+    assert lunch["logged"] is True
+
+
+@pytest.mark.asyncio
+async def test_correct_food_log_by_id_on_an_earlier_date_and_kcal_field():
+    conn = _make_conn()
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    conn.execute(
+        "INSERT INTO food_logs (date, meal_slot, description, protein_g, kcal, source, grams, food_name) "
+        "VALUES (?, 'dinner', '200g salmon', 40.0, 400.0, 'usda', 200, 'salmon')",
+        (yesterday,),
+    )
+    conn.commit()
+    log_id = get_food_logs_for_date(conn, yesterday)[0]["id"]
+
+    result = await correct_food_log(conn, log_id=log_id, field="kcal", new_value=416, date=yesterday)
+
+    assert result["updated"] is True
+    assert result["after"]["kcal"] == 416.0
+    assert get_food_logs_for_date(conn, yesterday)[0]["kcal"] == 416.0
+
+
+@pytest.mark.asyncio
+async def test_correct_food_log_rejects_more_protein_than_the_food_weighs():
+    # VM: "220g salmon" ended up at 880g protein.
+    conn = _make_conn()
+    logged = await log_food(conn, food_name="salmon", grams=220, meal_slot="dinner")
+
+    result = await correct_food_log(conn, log_id=logged["id"], field="protein_g", new_value=880)
+
+    assert "error" in result
+    assert get_food_logs_for_date(conn, date.today().isoformat())[0]["protein_g"] != 880
+
+
+@pytest.mark.asyncio
+async def test_delete_food_log_on_an_earlier_date():
+    conn = _make_conn()
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    for _ in range(2):
+        conn.execute(
+            "INSERT INTO food_logs (date, meal_slot, description, protein_g, kcal, source, grams, food_name) "
+            "VALUES (?, 'breakfast', '150g eggs', 18.0, 210.0, 'reference', 150, 'eggs')",
+            (yesterday,),
+        )
+    conn.commit()
+    dup_id = get_food_logs_for_date(conn, yesterday)[1]["id"]
+
+    result = await delete_food_log(conn, log_id=dup_id, date=yesterday)
+
+    assert result["deleted"] is True
+    assert len(get_food_logs_for_date(conn, yesterday)) == 1

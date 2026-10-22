@@ -90,7 +90,9 @@ def _squad_table(squad: list[dict]) -> str:
     for p in squad:
         marker = " (C)" if p["is_captain"] else (" (V)" if p["is_vice"] else "")
         bench = "  bench" if not p["starting"] else ""
-        lines.append(f"{p['position']:<4}{p['name']:<18}£{p['price']:.1f}m{marker}{bench}")
+        sell = p.get("sell_price")
+        sell_str = f" (sells £{sell:.1f}m)" if sell is not None and sell != p["price"] else ""
+        lines.append(f"{p['position']:<4}{p['name']:<18}£{p['price']:.1f}m{sell_str}{marker}{bench}")
     return "```\n" + "\n".join(lines) + "\n```"
 
 
@@ -227,6 +229,8 @@ async def _send_t24_status_fallback(context, conn) -> None:
     ft_line = f"Free transfers: {ft if ft is not None else '?'}"
     if bank is not None:
         ft_line += f"  |  Bank: £{bank:.1f}m"
+        if summary.get("bank_note"):
+            ft_line += f" ({summary['bank_note']})"
     lines += ["", ft_line]
 
     chips = await get_fpl_chips(conn)
@@ -400,18 +404,7 @@ async def _sync_passed_deadlines(conn, data: dict) -> None:
         replace_my_picks(conn, gw, rows)
 
         eh = picks_data.get("entry_history", {})
-        upsert_my_history(conn, {
-            "gw": gw,
-            "points": eh.get("points"),
-            "total_points": eh.get("total_points"),
-            "overall_rank": eh.get("overall_rank"),
-            "bank": eh.get("bank"),
-            "team_value": eh.get("value"),
-            "transfers": eh.get("event_transfers"),
-            "transfer_cost": eh.get("event_transfers_cost"),
-            "chip": picks_data.get("active_chip"),
-            "points_on_bench": eh.get("points_on_bench"),
-        })
+        _upsert_my_history_from_picks(conn, gw, picks_data)
         mark_notification_sent(conn, gw, "picks_synced", now_utc().isoformat())
         logger.info("FPL: synced picks/history for GW%d", gw)
 
@@ -434,6 +427,60 @@ async def _sync_passed_deadlines(conn, data: dict) -> None:
                 logger.warning("FPL money sanity check errored for GW%d, skipping: %s", gw, exc)
 
     await _sync_rivals(conn)
+
+
+def _upsert_my_history_from_picks(conn, gw: int, picks_data: dict) -> None:
+    eh = picks_data.get("entry_history", {})
+    upsert_my_history(conn, {
+        "gw": gw,
+        "points": eh.get("points"),
+        "total_points": eh.get("total_points"),
+        "overall_rank": eh.get("overall_rank"),
+        "bank": eh.get("bank"),
+        "team_value": eh.get("value"),
+        "transfers": eh.get("event_transfers"),
+        "transfer_cost": eh.get("event_transfers_cost"),
+        "chip": picks_data.get("active_chip"),
+        "points_on_bench": eh.get("points_on_bench"),
+    })
+
+
+_FINALISE_GWS_PER_TICK = 2  # gentle on the API while the one-off backfill of old GWs runs
+
+
+async def _finalise_history(conn) -> None:
+    """Re-read my and every rival's points/rank for gameweeks that are now
+    final (data_checked), once each, marked by a 'history_final' row.
+
+    _sync_passed_deadlines writes history just after the deadline, when the
+    gameweek's points are still 0 and the overall rank is last week's — and
+    never again, so the VM's my_history showed 0 points for GW3-7 (audit,
+    22 Oct 2026). Newest gameweek first, so a pending review isn't held up
+    by the one-off backfill of older ones.
+    """
+    pending = sorted(
+        (
+            g["gw"] for g in get_all_gameweeks(conn)
+            if g["data_checked"]
+            and was_notification_sent(conn, g["gw"], "picks_synced")
+            and not was_notification_sent(conn, g["gw"], "history_final")
+        ),
+        reverse=True,
+    )
+    for gw in pending[:_FINALISE_GWS_PER_TICK]:
+        picks_data = await fpl_client.picks(config.FPL_TEAM_ID, gw)
+        if picks_data is None:
+            continue
+        _upsert_my_history_from_picks(conn, gw, picks_data)
+        for rival in get_active_rivals(conn):
+            if not has_rival_picks(conn, gw, rival["entry_id"]):
+                continue
+            try:
+                await _sync_one_rival_gw(conn, rival["entry_id"], gw)
+            except Exception as exc:
+                logger.warning("FPL: final history for rival %d GW%d failed: %s", rival["entry_id"], gw, exc)
+        mark_notification_sent(conn, gw, "history_final", now_utc().isoformat())
+        logger.info("FPL: final points/ranks refreshed for GW%d", gw)
 
 
 # ── Rival sync — PHASE3-BRIEF.md Step 4 / PHASE3-ADDENDUM.md §0 ────────────
@@ -545,8 +592,11 @@ async def _fpl_tick(context) -> None:
         # and data_checked flip true in the same tick still reviews against
         # fresh points rather than an empty my_history row.
         await _sync_passed_deadlines(conn, data)
+        await _finalise_history(conn)
 
         for gw_row in get_unreviewed_finished_gameweeks(conn):
+            if not was_notification_sent(conn, gw_row["gw"], "history_final"):
+                continue  # review only once the final points are in
             await _send_review(context, conn, gw_row["gw"])
             mark_notification_sent(conn, gw_row["gw"], "review", now_utc().isoformat())
 

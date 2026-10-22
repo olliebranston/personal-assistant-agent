@@ -215,8 +215,17 @@ def owned_element_ids(conn: sqlite3.Connection) -> tuple[int, list[int]] | tuple
     return gw, [p["element_id"] for p in picks]
 
 
-def build_squad_rows(picks: list[dict], elements: dict[int, dict], teams: dict[int, dict]) -> list[dict]:
-    """Merge my_picks rows with bootstrap element data into a display-ready list, squad order."""
+def build_squad_rows(
+    picks: list[dict],
+    elements: dict[int, dict],
+    teams: dict[int, dict],
+    selling_price: dict[int, int] | None = None,
+) -> list[dict]:
+    """Merge my_picks rows with bootstrap element data into a display-ready list, squad order.
+
+    price is the market price; sell_price (when selling_price is given) is what
+    the player would sell for under FPL's half-the-rise rule — the number that
+    matters for a transfer, and what Ollie sees in the app's transfer screen."""
     rows = []
     for p in picks:
         el = elements.get(p["element_id"])
@@ -228,6 +237,10 @@ def build_squad_rows(picks: list[dict], elements: dict[int, dict], teams: dict[i
             "team": teams.get(el["team"], {}).get("short_name", "?"),
             "position": _POSITION_NAMES.get(el["element_type"], "?"),
             "price": fpl_client.price_to_gbp(el["now_cost"]),
+            "sell_price": (
+                fpl_client.price_to_gbp(selling_price[p["element_id"]])
+                if selling_price and p["element_id"] in selling_price else None
+            ),
             "is_captain": bool(p["is_captain"]),
             "is_vice": bool(p["is_vice"]),
             "multiplier": p["multiplier"],
@@ -266,9 +279,10 @@ def compute_free_transfers(history_rows: list[dict]) -> int:
     """Simulate the rolling free-transfer balance (max 5, since the 2023/24 rule change).
 
     GW1 has no free-transfer concept (unlimited, no cost) so simulation starts
-    at FT=1 heading into GW2. A wildcard/free hit GW doesn't consume or reset
-    the balance — transfers that week are unlimited and free, so the balance
-    just accrues as if 0 transfers were made.
+    at FT=1 heading into GW2. A wildcard/free hit GW keeps the saved balance
+    exactly as it was — neither consumed nor topped up. (It used to add one,
+    as if no transfers were made; Ollie's real 2026 history only matches the
+    FPL app's free-transfer count without that +1 — audit, 22 Oct 2026.)
     """
     ft = 1
     for row in sorted(history_rows, key=lambda r: r["gw"]):
@@ -276,7 +290,6 @@ def compute_free_transfers(history_rows: list[dict]) -> int:
             continue
         chip = row.get("chip")
         if chip in ("wildcard", "freehit"):
-            ft = min(ft + 1, 5)
             continue
         transfers_made = row.get("transfers") or 0
         cost = row.get("transfer_cost") or 0
@@ -316,8 +329,16 @@ async def get_fpl_squad(conn: sqlite3.Connection) -> dict:
         elements = element_index(data)
         teams = team_index(data)
 
-        gw, _ = owned_element_ids(conn)
-        squad = build_squad_rows(get_my_picks(conn, gw), elements, teams) if gw else []
+        gw, owned = owned_element_ids(conn)
+        selling = None
+        if gw:
+            try:
+                basis = cost_basis(set(owned), await fpl_client.transfers(config.FPL_TEAM_ID), elements)
+                selling = {eid: compute_selling_price(basis[eid], elements[eid]["now_cost"])
+                           for eid in owned if eid in elements}
+            except Exception as exc:  # sell prices are a nice-to-have; never block /fpl on them
+                logger.warning("get_fpl_squad: sell prices unavailable: %s", exc)
+        squad = build_squad_rows(get_my_picks(conn, gw), elements, teams, selling) if gw else []
 
         hist = await fpl_client.entry_history(config.FPL_TEAM_ID)
         past = normalize_history_rows(hist)
@@ -340,6 +361,12 @@ async def get_fpl_squad(conn: sqlite3.Connection) -> dict:
             "overall_rank": last_gw_row.get("overall_rank") if last_gw_row else None,
             "bank": fpl_client.price_to_gbp(last_gw_row["bank"]) if last_gw_row and last_gw_row.get("bank") is not None else None,
             "team_value": fpl_client.price_to_gbp(last_gw_row["team_value"]) if last_gw_row and last_gw_row.get("team_value") is not None else None,
+            # FPL's public API only reveals bank/transfers as of each deadline —
+            # say so, rather than present it as live (Ollie: "bank ... wrong").
+            "bank_note": (
+                f"as of the GW{last_gw_row['gw']} deadline — transfers made since won't show "
+                "until the next deadline passes"
+            ) if last_gw_row else None,
             "free_transfers": compute_free_transfers(past),
             "league_name": league_data.get("league", {}).get("name"),
             "league_rank": my_standing.get("rank") if my_standing else None,
@@ -1323,27 +1350,34 @@ async def get_fpl_recommendation(
         basis = cost_basis(current_squad, transfer_rows, elements)
         selling_price = {eid: compute_selling_price(basis[eid], now_cost[eid]) for eid in current_squad}
 
-        # Cross-check squad market value + bank against FPL's own reported team
-        # value (entry_history.value — current prices, not sell-on-fee-adjusted
-        # selling price; see verify_squad_value's docstring) before this money
-        # math feeds a real decision. Refuse rather than recommend on numbers
-        # we can't trust.
+        # Before this feeds a real decision, confirm the squad Robin synced is
+        # the one FPL actually holds for that gameweek — refuse if not.
+        #
+        # This used to compare today's market value + bank with entry_history's
+        # value, but that value is recorded at the gameweek, so any price rise
+        # since tripped it: on the VM it refused four times this season
+        # (computed £101.2m vs £100.8m on 22 Oct) with a perfectly good squad.
+        # The value gap is now only logged.
+        fpl_picks = await fpl_client.picks(config.FPL_TEAM_ID, squad_gw)
+        if fpl_picks is not None:
+            fpl_squad = {p["element"] for p in fpl_picks.get("picks", [])}
+            if fpl_squad != current_squad:
+                logger.error(
+                    "FPL squad check failed for GW%d: synced squad differs from FPL's by %d player(s)",
+                    squad_gw, len(fpl_squad ^ current_squad) // 2,
+                )
+                return {"error": (
+                    "squad check failed: the squad on record doesn't match FPL's for "
+                    f"GW{squad_gw} — refusing to recommend until it re-syncs"
+                )}
         reported_value = last_row.get("team_value") if last_row else None
         if reported_value is not None:
             ok, diff = verify_squad_value(now_cost, current_squad, bank, reported_value)
             if not ok:
-                computed = sum(now_cost.get(eid, 0) for eid in current_squad) + bank
-                logger.error(
-                    "FPL money sanity check failed: computed market value+bank £%.1fm vs "
-                    "FPL-reported value £%.1fm (diff %+.1fm) — refusing to recommend",
-                    computed / 10, reported_value / 10, diff / 10,
+                logger.info(
+                    "FPL: squad value has moved %+.1fm since GW%s's recorded value (price changes)",
+                    diff / 10, last_row.get("gw"),
                 )
-                return {
-                    "error": (
-                        f"squad value sanity check failed: computed £{computed/10:.1f}m "
-                        f"vs FPL-reported £{reported_value/10:.1f}m — refusing to recommend until this is resolved"
-                    )
-                }
 
         this_turn_in, in_problems = _resolve_names(force_in or [], elements)
         this_turn_out, out_problems = _resolve_names(force_out or [], elements)

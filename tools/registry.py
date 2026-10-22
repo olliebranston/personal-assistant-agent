@@ -40,6 +40,10 @@ def _summarise_log_exercises(args: dict, result: dict) -> str | None:
         parts.append("not re-logged, already logged today: " + ", ".join(
             e["exercise"] for e in result["skipped_duplicates"]
         ))
+    if result.get("needs_confirmation"):
+        parts.append("NOT logged, asked Ollie if correction or extra: " + ", ".join(
+            f"{e['exercise']} (already #{e['already_logged']['log_id']})" for e in result["needs_confirmation"]
+        ))
     return "; ".join(parts) or None
 
 
@@ -60,7 +64,11 @@ _WRITE_SUMMARIES: dict[str, Callable[[dict, dict], str | None] | None] = {
     "log_exercises": _summarise_log_exercises,
     "correct_exercise_log": _summarise_set_change("corrected", "after"),
     "delete_exercise_log": _summarise_set_change("deleted", "removed"),
-    "log_food": lambda a, r: f"logged food #{r['id']}: {r['grams']:g}g {r['food_name']}" if r.get("logged") else None,
+    "log_food": lambda a, r: (
+        f"logged food #{r['id']}: {r['grams']:g}g {r['food_name']}" if r.get("logged")
+        else f"NOT logged, already in that slot today: #{r['existing']['id']} {r['existing']['description']}"
+        if r.get("possible_duplicate") else None
+    ),
     "repeat_meal": lambda a, r: (
         f"logged {r['meal_slot']} again from {r['source_date']}: "
         + ", ".join(f"#{i['id']} {i['grams']:g}g {i['food_name']}" for i in r.get("items", []))
@@ -141,6 +149,9 @@ def build_tool_registry(
     # calls within one incoming message so the model can relay it verbatim
     # instead of re-summing tool results itself (see tools/meal.py).
     turn_totals: dict[str, float] = {"protein_g": 0.0, "kcal": 0.0}
+    # Also turn-scoped: food ids logged during this message, so log_food's
+    # duplicate guard only holds back items logged on an *earlier* message.
+    turn_logged_ids: set[int] = set()
 
     dispatch: dict[str, ToolFunc] = {
         "log_exercises": functools.partial(gym.log_exercises, conn),
@@ -155,7 +166,9 @@ def build_tool_registry(
         "log_run": functools.partial(running.log_run, conn),
         "get_recent_runs": functools.partial(running.get_recent_runs_tool, conn),
         "get_weekly_running_summary": functools.partial(running.get_weekly_running_summary, conn),
-        "log_food": functools.partial(meal.log_food, conn, turn_totals=turn_totals),
+        "log_food": functools.partial(
+            meal.log_food, conn, turn_totals=turn_totals, turn_logged_ids=turn_logged_ids
+        ),
         "repeat_meal": functools.partial(meal.repeat_meal, conn, turn_totals=turn_totals),
         "correct_food_log": functools.partial(meal.correct_food_log, conn),
         "delete_food_log": functools.partial(meal.delete_food_log, conn),

@@ -27,6 +27,7 @@ from storage.models import (
     RIVALS_DDL,
     get_my_history,
     get_my_picks,
+    get_rival_history_row,
     mark_notification_sent,
     set_acknowledged,
 )
@@ -381,6 +382,78 @@ async def test_review_sent_once_data_checked_and_not_repeated(_wired):
     review_messages = [m for m in bot.messages if "GW1 review" in m]
     assert len(review_messages) == 1
     assert "63" in review_messages[0]
+
+
+def _gw1_picks(points: int, total: int, rank: int | None) -> dict:
+    return {
+        "picks": [{"element": 100, "position": 1, "multiplier": 2, "is_captain": True, "is_vice_captain": False}],
+        "entry_history": {"points": points, "total_points": total, "overall_rank": rank,
+                           "bank": 0, "value": 100, "event_transfers": 0, "event_transfers_cost": 0,
+                           "points_on_bench": 4},
+        "active_chip": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_history_and_review_use_final_points_not_the_deadline_day_snapshot(_wired):
+    # VM audit (22 Oct): my_history had points=0 for GW3-7 and each GW's
+    # overall rank was the previous week's — the row was written once, just
+    # after the deadline, and the picks_synced flag stopped it ever being
+    # refreshed once the gameweek's points were final.
+    conn, state = _wired
+    past_deadline = _iso(fpl_jobs.now_utc() - timedelta(days=3))
+
+    state["bootstrap"] = _bootstrap(past_deadline, gw1_finished=False)
+    state["picks"][1] = _gw1_picks(points=0, total=0, rank=None)
+    await fpl_jobs._fpl_tick(_FakeContext(_FakeBot()))
+    assert get_my_history(conn, 1)["points"] == 0  # deadline-day snapshot
+
+    state["bootstrap"] = _bootstrap(past_deadline, gw1_finished=True, gw1_data_checked=True)
+    state["picks"][1] = _gw1_picks(points=63, total=63, rank=200000)
+    bot = _FakeBot()
+    await fpl_jobs._fpl_tick(_FakeContext(bot))
+
+    row = get_my_history(conn, 1)
+    assert (row["points"], row["overall_rank"]) == (63, 200000)
+    review = [m for m in bot.messages if "GW1 review" in m]
+    assert len(review) == 1
+    assert "Points: 63" in review[0]
+
+
+@pytest.mark.asyncio
+async def test_rival_history_is_refreshed_once_the_gameweek_is_final(monkeypatch, _wired):
+    conn, state = _wired
+    past_deadline = _iso(fpl_jobs.now_utc() - timedelta(days=3))
+    rival_points = {"value": 0}
+
+    async def _league(league_id):
+        return {"league": {"name": "L"}, "standings": {"results": [
+            {"entry": 555, "entry_name": "R", "player_name": "Rival", "rank": 1, "last_rank": 1},
+        ]}}
+
+    async def _entry(entry_id):
+        return {"started_event": 1}
+
+    async def _picks(team_id, gw):
+        if team_id == 555:
+            p = _gw1_picks(points=rival_points["value"], total=rival_points["value"], rank=1)
+            return p
+        return state["picks"].get(gw)
+
+    monkeypatch.setattr(fpl_jobs.fpl_client, "league", _league)
+    monkeypatch.setattr(fpl_jobs.fpl_client, "entry", _entry)
+    monkeypatch.setattr(fpl_jobs.fpl_client, "picks", _picks)
+
+    state["bootstrap"] = _bootstrap(past_deadline, gw1_finished=False)
+    state["picks"][1] = _gw1_picks(points=0, total=0, rank=None)
+    await fpl_jobs._fpl_tick(_FakeContext(_FakeBot()))
+
+    rival_points["value"] = 71
+    state["bootstrap"] = _bootstrap(past_deadline, gw1_finished=True, gw1_data_checked=True)
+    state["picks"][1] = _gw1_picks(points=63, total=63, rank=200000)
+    await fpl_jobs._fpl_tick(_FakeContext(_FakeBot()))
+
+    assert get_rival_history_row(conn, 1, 555)["points"] == 71
 
 
 # ── Resilience ────────────────────────────────────────────────────────────────

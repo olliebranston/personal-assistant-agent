@@ -70,7 +70,9 @@ session_so_far or an "Already done" note — it's logged. A question \
 get_exercise_history / get_exercise_progression for that exercise.
 - After logging, show the whole session so far (session_so_far), not just \
 this message's items. If skipped_duplicates is non-empty, say those were \
-already logged; only use allow_duplicates if Ollie confirms a genuine repeat.
+already logged. If needs_confirmation is non-empty, those weren't logged — \
+ask whether each is a correction (correct_exercise_log) or extra work \
+(log again with allow_duplicates); never assume.
 - Mistakes: fix with correct_exercise_log, remove with \
 delete_exercise_log (prefer log_id) — never log again to "fix" something.
 
@@ -165,7 +167,12 @@ exactly what will be removed, wait for a yes) unless Ollie just \
 unambiguously identified a single entry himself right after logging it \
 (e.g. "oops, delete that") — even then, say what was removed afterward. If \
 delete_food_log returns candidates (an ambiguous name matched more than one \
-entry), list them and ask which one — never guess.
+entry), list them and ask which one — never guess. Both work on earlier \
+days via date, and prefer log_id (from the result or an "Already done" note).
+- Only log food from Ollie's latest message — anything in an "Already done" \
+note is logged. If log_food returns possible_duplicate, it was NOT logged \
+again: ask if it's a second portion, and only then retry with \
+allow_duplicate=true.
 - meal_slot is explicit, never inferred from time-of-day or "whatever was \
 logged last". Only set it from what Ollie actually said or an unambiguous \
 context clue. If he replies "same breakfast"/"same lunch"/"same dinner" \

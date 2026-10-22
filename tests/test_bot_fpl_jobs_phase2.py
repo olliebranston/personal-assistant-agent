@@ -109,6 +109,12 @@ def _wired(monkeypatch):
     async def _transfers(team_id):
         return []
 
+    async def _picks(team_id, gw):
+        # FPL's own squad for the synced gameweek — matches _seed_current_squad,
+        # so get_fpl_recommendation's squad check passes.
+        return {"picks": [{"element": eid} for eid in legal_squad_ids()]}
+
+    monkeypatch.setattr(fpl_jobs.fpl_client, "picks", _picks)
     monkeypatch.setattr(fpl_jobs.fpl_client, "bootstrap", _bootstrap)
     monkeypatch.setattr(fpl_jobs.fpl_client, "fixtures", _fixtures)
     monkeypatch.setattr(fpl_jobs.fpl_client, "entry_history", _entry_history)

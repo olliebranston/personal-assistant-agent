@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 import httpx
 
@@ -21,6 +22,9 @@ logger = logging.getLogger(__name__)
 _BASE = "https://api.nal.usda.gov/fdc/v1"
 _PROTEIN_ID = 1003
 _KCAL_ID = 1008
+# Foundation-type foods report energy under the Atwater factors instead of
+# 1008 (General first, then Specific) — without these their kcal read as 0.
+_KCAL_FALLBACK_IDS = (2047, 2048)
 
 # Hardcoded fallback for 30 common foods Ollie eats.
 # Values are (protein_per_100g, kcal_per_100g) from USDA Standard Reference.
@@ -66,8 +70,11 @@ _FALLBACK: dict[str, tuple[float, float]] = {
     "scallops":         (15.0,  88.0),
     "scallop":          (15.0,  88.0),
     "venison":          (26.0, 158.0),
-    "whey protein":     (25.0, 120.0),
-    "protein powder":   (25.0, 120.0),
+    # Was (25.0, 120.0) — a per-scoop label value, not per 100g, so whey via
+    # this table was under-counted by ~2/3. These match USDA's own whey record
+    # as it appears in Ollie's food log (46.9g protein / 211 kcal per 60g).
+    "whey protein":     (78.0, 352.0),
+    "protein powder":   (78.0, 352.0),
     "peanut butter":    (25.0, 588.0),
     "edamame":          (11.0, 122.0),
     "tempeh":           (19.0, 193.0),
@@ -81,17 +88,24 @@ def _pre_lookup(query: str) -> tuple[float, float] | None:
     API mismatches. Returns (protein_per_100g, kcal_per_100g) or None.
     Rules are checked in order — more specific rules must come first."""
     q = query.lower().strip()
-    if "oat" in q and "milk" not in q and "flour" not in q:
+
+    def has(word: str) -> bool:
+        # Word-start match: plain substrings gave "goat cheese" oat macros and
+        # "eggplant" egg macros, while "oats"/"oatmeal"/"eggs" still match.
+        return re.search(r"\b" + re.escape(word), q) is not None
+
+    if has("oat") and "milk" not in q and "flour" not in q:
         return (13.0, 389.0)
     if "greek yog" in q:
         return (10.0, 59.0)
-    if "egg" in q and "white" not in q and "noodle" not in q and "fried" not in q and "pasta" not in q and "powder" not in q:
+    if (has("egg") and not has("eggplant") and "white" not in q and "noodle" not in q
+            and "fried" not in q and "pasta" not in q and "powder" not in q):
         return (12.0, 140.0)
     if "brown rice" in q:
         return (2.6, 123.0)
-    if "rice" in q and "brown" not in q and "fried" not in q and "wild" not in q:
+    if has("rice") and "brown" not in q and "fried" not in q and "wild" not in q:
         return (2.7, 130.0)
-    if "lentil" in q:
+    if has("lentil"):
         return (9.0, 116.0)
     return None
 
@@ -103,10 +117,18 @@ _MAX_PLAUSIBLE_KCAL_PER_100G = 900.0
 def _is_plausible(protein_per_100g: float, kcal_per_100g: float) -> bool:
     """Sanity bound on a USDA candidate — covers virtually all real foods
     (oils top out around 884 kcal/100g, isolated protein powders around
-    90g/100g) and rules out a mismatched product being picked silently."""
+    90g/100g) and rules out a mismatched product being picked silently.
+
+    Also rejects a record with neither protein nor energy (a nutrient-less
+    USDA entry logged "250g chicken breast" at 0g/0kcal) and one whose
+    protein alone (4 kcal/g) supplies more energy than the food has, with a
+    margin for rounding (a "salmon" entry came out at 400g protein vs 60 kcal).
+    """
     return (
         0.0 <= protein_per_100g <= _MAX_PLAUSIBLE_PROTEIN_PER_100G
         and 0.0 <= kcal_per_100g <= _MAX_PLAUSIBLE_KCAL_PER_100G
+        and (protein_per_100g > 0.0 or kcal_per_100g > 0.0)
+        and protein_per_100g * 4.0 <= kcal_per_100g * 1.15 + 10.0
     )
 
 
@@ -114,7 +136,9 @@ def _fallback_lookup(query: str) -> tuple[float, float] | None:
     """Check the hardcoded fallback table. Returns (protein_per_100g, kcal_per_100g) or None."""
     q = query.lower().strip()
     for key, vals in _FALLBACK.items():
-        if key in q or q in key:
+        # Whole-word match (plural allowed) — a plain substring gave
+        # "eggplant" egg macros and "licorice" rice macros.
+        if re.search(r"\b" + re.escape(key) + r"(?:e?s)?\b", q) or q in key:
             return vals
     return None
 
@@ -145,16 +169,7 @@ async def search(query: str, page_size: int = 5) -> list[dict]:
                 resp.raise_for_status()
                 data = resp.json()
 
-            results = []
-            for food in data.get("foods", []):
-                nutrients = food.get("foodNutrients", [])
-                results.append({
-                    "fdcId": food.get("fdcId"),
-                    "description": food.get("description", query),
-                    "protein_per_100g": _extract_nutrient(nutrients, _PROTEIN_ID),
-                    "kcal_per_100g": _extract_nutrient(nutrients, _KCAL_ID),
-                })
-            return results
+            return [_parse_usda_food(food, query) for food in data.get("foods", [])]
 
         except (httpx.HTTPError, httpx.TimeoutException) as exc:
             last_exc = exc
@@ -241,3 +256,19 @@ def _extract_nutrient(nutrients: list[dict], nutrient_id: int) -> float:
         if n.get("nutrientId") == nutrient_id:
             return float(n.get("value", 0.0))
     return 0.0
+
+
+def _parse_usda_food(food: dict, query: str) -> dict:
+    """One USDA search hit -> {fdcId, description, protein_per_100g, kcal_per_100g}."""
+    nutrients = food.get("foodNutrients", [])
+    kcal = _extract_nutrient(nutrients, _KCAL_ID)
+    for fallback_id in _KCAL_FALLBACK_IDS:
+        if kcal:
+            break
+        kcal = _extract_nutrient(nutrients, fallback_id)
+    return {
+        "fdcId": food.get("fdcId"),
+        "description": food.get("description", query),
+        "protein_per_100g": _extract_nutrient(nutrients, _PROTEIN_ID),
+        "kcal_per_100g": kcal,
+    }
