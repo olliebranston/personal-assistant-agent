@@ -45,6 +45,7 @@ not a second copy in a docs file.
 - Explain non-obvious code as it's being written.
 
 ## Common Commands
-- Run tests: `python -m pytest tests/ -v`
+- Run tests: `.venv/Scripts/python -m pytest tests/ -v` (`.venv/` is the local env; `venv/` isn't maintained)
+- Deploy check (on the VM): `bash scripts/robin_check.sh` — give VM commands one short line at a time; long pastes get mangled
 - Lint: `ruff check .`
 - Start bot locally: `python main.py`
