@@ -1036,6 +1036,14 @@ def log_xp_predictions(conn: sqlite3.Connection, gw: int, model_version: str, co
     conn.commit()
 
 
+def get_xp_model_versions(conn: sqlite3.Connection, gw: int) -> list[str]:
+    """Which models logged predictions for a gameweek (e.g. ['v0', 'v1'])."""
+    rows = conn.execute(
+        "SELECT DISTINCT model_version FROM xp_predictions WHERE gw = ? ORDER BY model_version", (gw,)
+    ).fetchall()
+    return [r["model_version"] for r in rows]
+
+
 def get_xp_predictions(conn: sqlite3.Connection, gw: int, model_version: str) -> dict[int, float]:
     rows = conn.execute(
         "SELECT element_id, xp FROM xp_predictions WHERE gw = ? AND model_version = ?",

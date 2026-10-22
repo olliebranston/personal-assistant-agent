@@ -24,13 +24,14 @@ TOOL_CALLING_DESIGN.md).
 from __future__ import annotations
 
 import collections
+import dataclasses
 import json
 import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import config
-from services import fpl_calendar, fpl_client, fpl_league, fpl_xp
+from services import fpl_calendar, fpl_client, fpl_league, fpl_xp, fpl_xp_v1
 from services.fpl_optimiser import (
     HIT_COST_PER_TRANSFER,
     RECOMMENDATION_BIAS_PER_HIT,
@@ -60,6 +61,8 @@ from storage.models import (
     get_rival_history_for_entry,
     get_rival_history_row,
     get_rival_picks,
+    get_xp_model_versions,
+    get_xp_predictions,
     log_xp_predictions,
     prune_expired_preferences,
     set_acknowledged,
@@ -736,6 +739,40 @@ async def build_pre_deadline_facts(conn: sqlite3.Connection, gw: int | None = No
         return {"error": str(exc)}
 
 
+async def get_fpl_model_accuracy(conn: sqlite3.Connection, gw: int | None = None) -> dict:
+    """W5 calibration: how close each logged xP model came to the points
+    players actually scored in a finished gameweek (default: the latest
+    final one). Compared only on players every model predicted, so v0 and
+    v1 are judged on the same group. Lower mean_abs_error is better; bias
+    above 0 means the model over-predicts."""
+    err = _not_configured()
+    if err:
+        return err
+    try:
+        gw = gw or _latest_final_gw(conn)
+        if not gw:
+            return {"error": "no finished gameweek with final points yet"}
+        versions = get_xp_model_versions(conn, gw)
+        if not versions:
+            return {"error": f"no predictions were logged for GW{gw}"}
+        predictions = {v: get_xp_predictions(conn, gw, v) for v in versions}
+        common = set.intersection(*(set(p) for p in predictions.values()))
+        if not common:
+            return {"error": f"the models logged for GW{gw} share no players to compare"}
+        live = await fpl_client.live(gw)
+        models = {}
+        for version, preds in predictions.items():
+            errors = [preds[eid] - live.get(eid, 0) for eid in common]
+            models[version] = {
+                "mean_abs_error": round(sum(abs(e) for e in errors) / len(errors), 2),
+                "bias": round(sum(errors) / len(errors), 2),
+            }
+        return {"gw": gw, "players_compared": len(common), "models": models}
+    except Exception as exc:
+        logger.warning("get_fpl_model_accuracy failed: %s", exc)
+        return {"error": str(exc)}
+
+
 def _named_bench_swap(swap: dict | None, names: dict[int, str]) -> dict | None:
     if not swap:
         return None
@@ -1146,29 +1183,49 @@ def _build_candidate_pool(
     horizon: int,
     current_squad: set[int],
     force_in: set[int] = frozenset(),
-) -> tuple[list[Candidate], dict[int, dict[int, float]]]:
-    """Candidate pool for the optimiser, plus the raw (undiscounted) per-GW xp
-    breakdown per candidate — the latter is what gets logged to xp_predictions,
-    since a discounted planning value isn't a 'prediction' for a specific GW."""
+) -> tuple[list[Candidate], dict[int, dict[int, float]], dict[str, dict[int, float]]]:
+    """Candidate pool for the optimiser, the raw (undiscounted) per-GW xp per
+    candidate that planning uses, and each model's start_gw predictions by
+    version — what gets logged to xp_predictions (a discounted planning value
+    isn't a 'prediction' for a specific GW).
+
+    Planning uses the v1 scoring-rule model (services/fpl_xp_v1.py) wherever
+    FPL's per-90 stats are present, v0 otherwise; both are logged so their
+    accuracy can be compared once the gameweek is played (model_accuracy).
+
+    Candidacy (Oct 2026): an available player qualifies on season minutes OR
+    on 2+ starts — the minutes floor alone excluded new signings and players
+    back from injury who are starting again."""
     candidates: list[Candidate] = []
     raw_predictions: dict[int, dict[int, float]] = {}
+    by_version: dict[str, dict[int, float]] = {fpl_xp.MODEL_VERSION: {}, fpl_xp_v1.MODEL_VERSION: {}}
     min_minutes = _candidacy_minutes_floor(start_gw)
+    scoring = fpl_xp_v1.scoring_from_bootstrap(data)
+    gws_played = sum(1 for e in data.get("events", []) if e.get("finished"))
 
     for el in data["elements"]:
         eid = el["id"]
         minutes = el.get("minutes") or 0
         avail = fpl_xp.availability(el["status"], el.get("chance_of_playing_next_round"))
-        keep = eid in current_squad or eid in force_in or (avail > 0.74 and minutes >= min_minutes)
+        established = minutes >= min_minutes or (el.get("starts") or 0) >= 2
+        keep = eid in current_squad or eid in force_in or (avail > 0.74 and established)
         if not keep:
             continue
 
         ppg = float(el.get("points_per_game") or 0.0)
-        raw_by_gw = fpl_xp.horizon_xp(
+        v0_by_gw = fpl_xp.horizon_xp(
             points_per_game=ppg, minutes=minutes, status=el["status"],
             chance_of_playing_next_round=el.get("chance_of_playing_next_round"),
             team_id=el["team"], fixtures=fixtures, start_gw=start_gw, horizon=horizon,
             discount=1.0,
         )
+        by_version[fpl_xp.MODEL_VERSION][eid] = v0_by_gw.get(start_gw, 0.0)
+        raw_by_gw = v0_by_gw
+        if fpl_xp_v1.has_v1_inputs(el):
+            raw_by_gw = fpl_xp_v1.horizon_xp(
+                el, _POSITION_NAMES[el["element_type"]], fixtures, start_gw, horizon, scoring, gws_played,
+            )
+            by_version[fpl_xp_v1.MODEL_VERSION][eid] = raw_by_gw.get(start_gw, 0.0)
         discounted = sum(v * (fpl_xp.HORIZON_DISCOUNT**i) for i, v in enumerate(raw_by_gw.values()))
 
         raw_predictions[eid] = raw_by_gw
@@ -1177,7 +1234,7 @@ def _build_candidate_pool(
             now_cost=el["now_cost"], horizon_xp=discounted,
         ))
 
-    return candidates, raw_predictions
+    return candidates, raw_predictions, {v: preds for v, preds in by_version.items() if preds}
 
 
 def _resolve_names(names: list[str], elements: dict[int, dict]) -> tuple[set[int], list[str]]:
@@ -1635,7 +1692,7 @@ async def get_fpl_recommendation(
         force_out_ids -= this_turn_in
         force_in_ids -= this_turn_out
 
-        candidates, raw_predictions = _build_candidate_pool(
+        candidates, raw_predictions, predictions_by_version = _build_candidate_pool(
             data, fixtures, gw, _HORIZON, current_squad, force_in=force_in_ids,
         )
         candidate_ids = {c.element_id for c in candidates}
@@ -1647,10 +1704,21 @@ async def get_fpl_recommendation(
             )
             force_in_ids -= missing_force_in
 
-        log_xp_predictions(
-            conn, gw, fpl_xp.MODEL_VERSION, now_utc().isoformat(),
-            {eid: by_gw.get(gw, 0.0) for eid, by_gw in raw_predictions.items()},
-        )
+        logged_at = now_utc().isoformat()
+        for version, predictions in predictions_by_version.items():
+            log_xp_predictions(conn, gw, version, logged_at, predictions)
+
+        # League-aware planning (W5): only in protect/chase — neutral, the
+        # mode for most of the season, leaves every player's xP untouched.
+        league_mode = await _eo_mode_for_ollie(gw)
+        if league_mode in ("protect", "chase"):
+            league_eo_by_id = _captain_eo_context(conn, gw, {c.element_id for c in candidates})
+            if league_eo_by_id:
+                candidates = [
+                    dataclasses.replace(c, horizon_xp=fpl_league.league_tilt(
+                        c.horizon_xp, league_eo_by_id.get(c.element_id, 0.0), league_mode))
+                    for c in candidates
+                ]
 
         solve_kwargs = dict(
             candidates=candidates, current_squad=current_squad, selling_price=selling_price,
@@ -1840,6 +1908,27 @@ TOOL_SCHEMAS: list[dict] = [
                         "type": ["integer", "null"],
                         "description": "Gameweek to analyse. Omit for the latest final one.",
                     },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_fpl_model_accuracy",
+            "description": (
+                "How accurate Robin's expected-points models were for a finished gameweek: each "
+                "model's (v0 = old points-per-game heuristic, v1 = scoring-rule model used for "
+                "recommendations) mean absolute error and bias vs the points players actually "
+                "scored. Use for 'how good are your predictions', 'is the new model better'. "
+                "Lower error is better; bias > 0 means over-predicting. Errors until a gameweek "
+                "with logged predictions has finished — relay that plainly."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "gw": {"type": ["integer", "null"], "description": "Finished gameweek. Omit for the latest."},
                 },
                 "required": [],
             },

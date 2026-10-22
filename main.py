@@ -246,7 +246,9 @@ finished gameweek itself (quote only its numbers; if it has a `note`, \
 mention it). "Last week"/"last gameweek" always means the latest FINISHED \
 gameweek, never the upcoming one whose deadline hasn't passed — so never \
 pass the upcoming gameweek's number to it or to get_fpl_gw_review. \
-get_fpl_chips \
+get_fpl_model_accuracy -> 'how good are your predictions' / 'is the new \
+model better' (v1 drives recommendations; v0 is the old model kept for \
+comparison). get_fpl_chips \
 -> '/fpl chips' or 'when should I use my chips' (it already includes a \
 chip-timing signal — don't also call get_fpl_calendar for that question). \
 get_fpl_calendar -> 'any blanks coming up' or double-gameweek questions. \

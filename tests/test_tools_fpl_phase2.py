@@ -702,6 +702,76 @@ async def test_get_fpl_recommendation_logs_xp_predictions(_wired):
     assert all(v >= 0 for v in preds.values())
 
 
+def _add_per_90_stats(bootstrap: dict) -> None:
+    """Give every synthetic player the FPL per-90 fields v1 reads."""
+    for el in bootstrap["elements"]:
+        el.update({
+            "starts": 1, "minutes": 90, "expected_goals_per_90": 0.2, "expected_assists_per_90": 0.1,
+            "expected_goals_conceded_per_90": 1.2, "saves_per_90": 3.0 if el["element_type"] == 1 else 0,
+            "defensive_contribution_per_90": 8.0, "bonus": 1,
+        })
+
+
+@pytest.mark.asyncio
+async def test_recommendation_plans_on_v1_and_logs_both_models(_wired):
+    # W5 (Oct 2026): with FPL's per-90 stats present, planning uses the
+    # scoring-rule model v1; v0 is still logged so the two can be compared
+    # against actual points once the gameweek is played.
+    conn, bootstrap, fixtures = _wired
+    _add_per_90_stats(bootstrap)
+    _seed_current_squad(conn, bootstrap)
+
+    result = await get_fpl_recommendation(conn)
+
+    assert "error" not in result, result.get("error")
+    v0 = get_xp_predictions(conn, gw=2, model_version="v0")
+    v1 = get_xp_predictions(conn, gw=2, model_version="v1")
+    assert v0 and v1
+    assert set(v1) <= set(v0)
+    assert v0 != v1  # genuinely different models
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode,expect_tilt", [("chase", True), ("protect", True), ("neutral", False)])
+async def test_league_tilt_only_applies_when_protecting_or_chasing(monkeypatch, _wired, mode, expect_tilt):
+    conn, bootstrap, fixtures = _wired
+    _seed_current_squad(conn, bootstrap)
+    calls = []
+
+    async def _mode(gw):
+        return mode
+
+    def _spy_tilt(xp, eo_pct, m):
+        calls.append(m)
+        return xp
+
+    monkeypatch.setattr(fpl_tools, "_eo_mode_for_ollie", _mode)
+    monkeypatch.setattr(fpl_tools, "_captain_eo_context", lambda conn, gw, ids: {i: 50.0 for i in ids})
+    monkeypatch.setattr(fpl_tools.fpl_league, "league_tilt", _spy_tilt)
+
+    result = await get_fpl_recommendation(conn)
+
+    assert "error" not in result
+    assert bool(calls) is expect_tilt
+
+
+def test_candidate_pool_admits_a_regular_starter_below_the_minutes_floor():
+    # A new signing or a player back from injury with 2+ starts but few
+    # season minutes used to be filtered out by the minutes floor alone.
+    bootstrap = synthetic_bootstrap(num_gws=10)
+    fixtures = synthetic_fixtures(num_gws=10)
+    late = next(e for e in bootstrap["elements"] if e["element_type"] == 3)
+    late.update({"minutes": 180, "starts": 2})
+    unused = next(e for e in bootstrap["elements"] if e["element_type"] == 3 and e is not late)
+    unused.update({"minutes": 180, "starts": 0})
+
+    candidates, _, _ = fpl_tools._build_candidate_pool(bootstrap, fixtures, start_gw=8, horizon=5, current_squad=set())
+    ids = {c.element_id for c in candidates}
+
+    assert late["id"] in ids
+    assert unused["id"] not in ids
+
+
 @pytest.mark.asyncio
 async def test_get_fpl_recommendation_captain_is_in_the_recommended_options_xi_flavour(_wired):
     conn, bootstrap, fixtures = _wired

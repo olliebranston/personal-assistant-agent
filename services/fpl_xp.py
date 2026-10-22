@@ -1,5 +1,9 @@
 """Expected-points v0 heuristic (PHASE2-BRIEF.md §2).
 
+Superseded for planning by services/fpl_xp_v1.py (Oct 2026) wherever FPL's
+per-90 stats are available; still computed and logged every recommendation
+so the two can be compared (tools.fpl.get_fpl_model_accuracy).
+
 Same maths as fpl_squad_v0.py's `load()`, ported to run off live
 bootstrap-static + fixtures instead of CSV snapshots — deliberately not
 improved here (that's Phase 4's Dixon-Coles work). Pure functions only, no

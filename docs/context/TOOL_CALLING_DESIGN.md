@@ -70,9 +70,9 @@ tool returns, and conversation history.
 
 ## 2. Tool Catalog
 
-40 tools across 8 domains, as actually registered in
+41 tools across 8 domains, as actually registered in
 `tools/registry.py:build_tool_registry`'s dispatch table (9 gym, 12 meal, 2
-calendar, 1 news, 1 briefing, 1 reminders, 9 FPL, 3 running).
+calendar, 1 news, 1 briefing, 1 reminders, 10 FPL, 3 running).
 `ToolRegistry.execute` also records each successful *write* in
 `registry.actions`; `main._handle_tool_calling` stores them as a system
 note in conversation memory so the next turn knows what's already logged. All tools are
@@ -293,7 +293,7 @@ racing API being rate-limited) doesn't block the rest; falls back to the
 
 ### 2.7 FPL tools (`tools/fpl.py`)
 
-Nine tools added after this document was originally written — Fantasy
+Ten tools added after this document was originally written — Fantasy
 Premier League squad/team management, mini-league comparison, and
 recommendations, per `FPL-CONTEXT.md`'s doctrine. Each returns a
 domain-specific dict too large to usefully flatten here; read
@@ -314,6 +314,9 @@ and purpose:
   template holes, flagged players). The same facts open the T-24h briefing
   as their own message, with an AI summary on top only if every number in
   it appears in the facts (`bot/fpl_jobs._pre_deadline_summary`).
+- `get_fpl_model_accuracy(gw: int | null = null)` — each logged xP model's mean
+  absolute error and bias vs actual points for a finished gameweek, on the
+  players every model predicted (also logged when a gameweek goes final).
 - `get_fpl_chips()` — chip usage/availability across both halves of the season.
 - `get_fpl_calendar(horizon: int = 8)` — blank/double gameweek detection ahead.
 - `get_fpl_recommendation()` — the full transfer/captaincy/chip
@@ -322,7 +325,12 @@ and purpose:
   `FPL-CONTEXT.md` §4.1) — never fabricated by the model. Transfers are
   planned on 5-gameweek discounted xP; the captain, runner-up and margin
   use this gameweek's xP only (Oct 2026). It refuses only if the synced
-  squad differs from FPL's picks, not on price moves.
+  squad differs from FPL's picks, not on price moves. Planning xP is the v1
+  scoring-rule model (`services/fpl_xp_v1.py`, Oct 2026: FPL's own scoring
+  table from bootstrap `game_config`, per-90 xG/xA/xGC/saves/defensive
+  actions, shrunk per-start bonus/cards/penalty rates), v0 where per-90
+  stats are missing; both are logged. A small league-ownership tilt applies
+  only in protect/chase mode.
 - `fpl_acknowledge()` — marks the current gameweek's reminder ladder as
   actioned, stopping further nudges.
 
@@ -412,7 +420,7 @@ A block of **structured, always-current** data, rebuilt from the DB on every inc
 [Current user message]
 ```
 
-Tool definitions themselves (§2, 40 tools) are passed via the API's native
+Tool definitions themselves (§2, 41 tools) are passed via the API's native
 `tools=[...]` parameter, not inlined into the prompt text — this is what
 lets the model do structured argument-extraction natively instead of via
 `_extract_json` + a hand-rolled JSON schema in prose.

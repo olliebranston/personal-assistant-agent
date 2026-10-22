@@ -269,3 +269,20 @@ def best_bench_swap(picks: list[dict], live_points: dict[int, int], positions: d
                 best = {"bench": b["element_id"], "bench_points": b_pts, "starter": s["element_id"],
                         "starter_points": live_points.get(s["element_id"], 0), "cost": cost}
     return best
+
+
+LEAGUE_TILT = 0.10  # at most +/-10% of a player's planning xP
+
+
+def league_tilt(xp: float, eo_pct: float, mode: str | None) -> float:
+    """FPL-CONTEXT.md §2.1's mode switch applied to planning xP (W5, Oct 2026):
+    'protect' (leading, <10 GWs left) nudges towards players the league owns,
+    'chase' (behind, <10 GWs left) towards players it doesn't, 'neutral' (the
+    default for most of the season) leaves xP alone. eo_pct is league EO
+    (league_eo), clipped to 0-100 so a widely-captained player doesn't
+    dominate. A nudge, not an override — at most LEAGUE_TILT either way."""
+    if mode not in ("protect", "chase"):
+        return xp
+    share = min(max(eo_pct, 0.0), 100.0) / 100.0
+    lean = (share - 0.5) if mode == "protect" else (0.5 - share)
+    return xp * (1.0 + 2.0 * LEAGUE_TILT * lean)

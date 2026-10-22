@@ -31,6 +31,7 @@ from storage.models import (
     get_latest_snapshot,
     get_my_history,
     get_unreviewed_finished_gameweeks,
+    get_xp_model_versions,
     has_rival_picks,
     insert_player_snapshots,
     is_acknowledged,
@@ -51,6 +52,7 @@ from tools.fpl import (
     get_fpl_calendar,
     get_fpl_chips,
     get_fpl_gw_review,
+    get_fpl_model_accuracy,
     get_fpl_recommendation,
     get_fpl_squad,
     now_utc,
@@ -554,6 +556,14 @@ async def _finalise_history(conn) -> None:
                 logger.warning("FPL: final history for rival %d GW%d failed: %s", rival["entry_id"], gw, exc)
         mark_notification_sent(conn, gw, "history_final", now_utc().isoformat())
         logger.info("FPL: final points/ranks refreshed for GW%d", gw)
+        try:  # calibration is informational — it must never break the tick
+            if get_xp_model_versions(conn, gw):  # only weeks a recommendation actually ran
+                accuracy = await get_fpl_model_accuracy(conn, gw)
+                if "error" not in accuracy:
+                    logger.info("FPL model accuracy GW%d (%d players): %s",
+                                gw, accuracy["players_compared"], accuracy["models"])
+        except Exception as exc:
+            logger.warning("FPL model accuracy for GW%d skipped: %s", gw, exc)
 
 
 # ── Rival sync — PHASE3-BRIEF.md Step 4 / PHASE3-ADDENDUM.md §0 ────────────

@@ -328,3 +328,36 @@ async def test_no_analysis_message_without_final_data(monkeypatch, _wired):
     await fpl_jobs._send_pre_deadline_analysis(_FakeContext(bot), _wired)
 
     assert bot.messages == []
+
+
+# ── Model accuracy: predicted vs actual (W5) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_model_accuracy_compares_versions_on_the_same_players(_wired):
+    from storage.models import XP_PREDICTION_DDL, log_xp_predictions
+
+    _wired.execute(XP_PREDICTION_DDL)
+    # Actual GW7 points (fixture): Haaland 4, Palmer 12, Saka 10.
+    log_xp_predictions(_wired, 7, "v0", "t", {1: 8.0, 2: 6.0, 3: 6.0, 4: 3.0})
+    log_xp_predictions(_wired, 7, "v1", "t", {1: 6.0, 2: 10.0, 3: 9.0})
+
+    result = await fpl_tools.get_fpl_model_accuracy(_wired)
+
+    assert result["gw"] == 7
+    assert result["players_compared"] == 3  # only players both models predicted
+    v0, v1 = result["models"]["v0"], result["models"]["v1"]
+    assert v0["mean_abs_error"] == pytest.approx((4 + 6 + 4) / 3, abs=0.01)
+    assert v1["mean_abs_error"] == pytest.approx((2 + 2 + 1) / 3, abs=0.01)
+    assert v1["bias"] == pytest.approx((2 - 2 - 1) / 3, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_model_accuracy_errors_without_logged_predictions(_wired):
+    from storage.models import XP_PREDICTION_DDL
+
+    _wired.execute(XP_PREDICTION_DDL)
+
+    result = await fpl_tools.get_fpl_model_accuracy(_wired)
+
+    assert "error" in result

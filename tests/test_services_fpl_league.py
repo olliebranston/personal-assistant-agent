@@ -10,6 +10,7 @@ from services.fpl_league import (
     best_bench_swap,
     eo_mode,
     gw_review_decomposition,
+    league_tilt,
     league_eo,
     league_template_holes,
     my_differentials,
@@ -276,3 +277,21 @@ def test_best_bench_swap_none_when_the_bench_scored_less():
     mine = _picks({1: 1, 4: 1, 5: 1, 6: 1, 7: 2}, bench=[3])  # bench Gvardiol scored 0
 
     assert best_bench_swap(mine, _LIVE_XI, _POS) is None
+
+
+# ── league_tilt (W5) ────────────────────────────────────────────────────────
+
+
+def test_league_tilt_leaves_xp_alone_in_neutral_mode():
+    assert league_tilt(6.0, 100.0, "neutral") == 6.0
+    assert league_tilt(6.0, 0.0, None) == 6.0
+
+
+def test_league_tilt_protect_favours_what_the_league_owns():
+    assert league_tilt(6.0, 100.0, "protect") == 6.0 * 1.10
+    assert league_tilt(6.0, 0.0, "protect") == 6.0 * 0.90
+
+
+def test_league_tilt_chase_favours_what_the_league_does_not_own():
+    assert league_tilt(6.0, 0.0, "chase") == 6.0 * 1.10
+    assert league_tilt(6.0, 143.0, "chase") == 6.0 * 0.90  # >100% EO clipped
