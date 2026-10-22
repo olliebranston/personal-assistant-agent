@@ -286,7 +286,7 @@ From the patterns in your codebase, watch for these specific failure modes:
 |---|---|---|
 | Hardcoded nutrition values | Protein estimates are often 20–30% off | Unit test against USDA values |
 | Model string goes stale | OpenRouter silently fails or degrades | Log model name in each response during dev |
-| `.venv` vs `venv` (local dev only) | Whichever one you last `pip install`ed into is the one that actually has packages | `pip list` in each before assuming either is current — as of this pass, `.venv` had the full dependency set and `venv` was missing packages including `pytest`, contradicting an earlier version of this doc's "always use `venv`" rule. Pick one, provision it fully, and say so here — this table entry should name the actual canonical choice, not assume one. The Oracle deployment has its own separate Linux venv; it's unaffected by whichever of these two you use locally. |
+| `.venv` vs `venv` (local dev only) | Whichever one you last `pip install`ed into is the one that actually has packages | `pip list` in each before assuming either is current — as of this pass, `.venv` had the full dependency set and `venv` was missing packages including `pytest`, contradicting an earlier version of this doc's "always use `venv`" rule. **Decided Oct 2026: `.venv/` is the local environment for tests, ruff and running the bot** — it has the full dependency set; `venv/` is not maintained. The Oracle deployment has its own separate Linux venv; it's unaffected by whichever of these two you use locally. |
 | Timezone errors | Calendar events created in UTC not BST | Integration test with known event times |
 | RSS hallucination | Racing results fabricated | Use structured API; test that response matches source data format |
 | Moralising meal responses | Agent adds unsolicited commentary | Explicit phrase-matching test |
@@ -474,9 +474,9 @@ python main.py
 
 # Deploy
 git push origin main
-ssh -i "path/to/ssh-key" ubuntu@140.238.77.214
-git pull && sudo systemctl restart robin
-sudo journalctl -u robin -f
+ssh -i "path/to/ssh-key" ubuntu@<VM_IP>
+git pull --ff-only && sudo systemctl restart robin
+bash scripts/robin_check.sh      # health check: commit, jobs, errors, FPL history (redacted)
 
 # Check service status
 sudo systemctl status robin

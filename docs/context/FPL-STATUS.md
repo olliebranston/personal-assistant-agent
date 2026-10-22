@@ -33,7 +33,10 @@ captained hat-trick, not a Bench Boost. Ollie has all 8 chips and 2 free transfe
 
 ## Known problems
 
-1. **The Telegram module may not be running on the Oracle deployment.** This
+1. **RESOLVED (22 Oct 2026 audit):** the FPL module has been live since 1 Sept
+   12:05 — 9 jobs registered, T-24h/review messages sent every gameweek since
+   (`notifications_sent`), VM on the latest commit. Original note kept below.
+   *The Telegram module may not be running on the Oracle deployment.* This
    was the diagnosis as of the start of this session (1 Sept 2026) — no
    messages received, FPL questions answered with generic LLM waffle instead
    of tool calls, suspected cause: the code was built locally and never
