@@ -70,9 +70,9 @@ tool returns, and conversation history.
 
 ## 2. Tool Catalog
 
-39 tools across 8 domains, as actually registered in
+40 tools across 8 domains, as actually registered in
 `tools/registry.py:build_tool_registry`'s dispatch table (9 gym, 12 meal, 2
-calendar, 1 news, 1 briefing, 1 reminders, 8 FPL, 3 running).
+calendar, 1 news, 1 briefing, 1 reminders, 9 FPL, 3 running).
 `ToolRegistry.execute` also records each successful *write* in
 `registry.actions`; `main._handle_tool_calling` stores them as a system
 note in conversation memory so the next turn knows what's already logged. All tools are
@@ -293,24 +293,36 @@ racing API being rate-limited) doesn't block the rest; falls back to the
 
 ### 2.7 FPL tools (`tools/fpl.py`)
 
-Eight tools added after this document was originally written — Fantasy
+Nine tools added after this document was originally written — Fantasy
 Premier League squad/team management, mini-league comparison, and
 recommendations, per `FPL-CONTEXT.md`'s doctrine. Each returns a
 domain-specific dict too large to usefully flatten here; read
 `tools/fpl.py`'s own `TOOL_SCHEMAS` descriptions for exact shapes. Names
 and purpose:
 
-- `get_fpl_squad()` — current 15-man squad with live prices/status.
+- `get_fpl_squad()` — current 15-man squad with live prices/status, each
+  player's sell price (FPL's half-the-rise rule), and the bank labelled as of
+  the last deadline (the public API shows nothing newer).
 - `get_fpl_team()` — starting XI/bench, formation, captain/vice.
 - `get_fpl_league()` — mini-league standings plus rival-relative EO,
   differentials, template holes, captains above Ollie in the league.
 - `get_fpl_gw_review(gw: int)` — points breakdown for a past gameweek.
+- `get_fpl_league_analysis(gw: int | null = null)` — `build_pre_deadline_facts`:
+  the latest final gameweek vs the whole mini-league (league average, rank
+  movement, gap to the leader and the place above split into
+  captain/bench/squad causes, captain, bench, transfers' net points, league
+  template holes, flagged players). The same facts open the T-24h briefing
+  as their own message, with an AI summary on top only if every number in
+  it appears in the facts (`bot/fpl_jobs._pre_deadline_summary`).
 - `get_fpl_chips()` — chip usage/availability across both halves of the season.
 - `get_fpl_calendar(horizon: int = 8)` — blank/double gameweek detection ahead.
 - `get_fpl_recommendation()` — the full transfer/captaincy/chip
   recommendation, validated against live data by `services/fpl_validate.py`
   before being returned (the "hallucination firewall" — see
-  `FPL-CONTEXT.md` §4.1) — never fabricated by the model.
+  `FPL-CONTEXT.md` §4.1) — never fabricated by the model. Transfers are
+  planned on 5-gameweek discounted xP; the captain, runner-up and margin
+  use this gameweek's xP only (Oct 2026). It refuses only if the synced
+  squad differs from FPL's picks, not on price moves.
 - `fpl_acknowledge()` — marks the current gameweek's reminder ladder as
   actioned, stopping further nudges.
 
@@ -400,7 +412,7 @@ A block of **structured, always-current** data, rebuilt from the DB on every inc
 [Current user message]
 ```
 
-Tool definitions themselves (§2, 39 tools) are passed via the API's native
+Tool definitions themselves (§2, 40 tools) are passed via the API's native
 `tools=[...]` parameter, not inlined into the prompt text — this is what
 lets the model do structured argument-extraction natively instead of via
 `_extract_json` + a hand-rolled JSON schema in prose.

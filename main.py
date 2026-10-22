@@ -239,7 +239,10 @@ once rival data has synced, differentials/template holes/captains-above/ \
 chips-used — see below). get_fpl_gw_review -> 'why did I lose to X this \
 week' or 'what happened in the league' (pass the gw); needs that \
 gameweek's points and rival picks already synced, so relay its error \
-plainly rather than guessing if it's too soon. get_fpl_chips \
+plainly rather than guessing if it's too soon. get_fpl_league_analysis -> \
+'why did I gain/lose ground', 'how did I do vs the league', 'what should I \
+change' (latest final gameweek vs the whole mini-league; quote only its \
+numbers). get_fpl_chips \
 -> '/fpl chips' or 'when should I use my chips' (it already includes a \
 chip-timing signal — don't also call get_fpl_calendar for that question). \
 get_fpl_calendar -> 'any blanks coming up' or double-gameweek questions. \
@@ -319,7 +322,9 @@ that's a real, useful answer, not a gap. Keep `changes_from_current` in \
 its own clearly separate section from the transfer options above it — a \
 bench-to-XI swap with no transfer behind it is NOT a transfer, don't fold \
 the two together into one list.
-- `captain`'s `margin` field tells you how to frame it: "clear" is settled, \
+- `captain`'s xP figures are expected points for THIS gameweek only (the \
+transfer options' xp_delta is over the 5-gameweek horizon — don't mix the \
+two up). Its `margin` field tells you how to frame it: "clear" is settled, \
 state it plainly; "close" or "coin-flip" means say so out loud and give \
 the runner-up's xP alongside the pick, not a single confident name. Always \
 name `vice` too (use `vice_name`) — it's chosen independently of the \

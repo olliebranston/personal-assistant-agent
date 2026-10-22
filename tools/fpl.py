@@ -570,6 +570,202 @@ async def get_fpl_gw_review(conn: sqlite3.Connection, gw: int) -> dict:
         return {"error": str(exc)}
 
 
+# ── Pre-deadline league analysis (W6, Oct 2026) ───────────────────────────
+# Ollie: "when I get my first message ahead of the gameweek transfer deadline
+# I want some good analysis on why I gained / lost on the group, and what I
+# need to change for my next week". Everything here is deterministic fact;
+# bot/fpl_jobs.py may add a short AI summary on top, but only one whose
+# numbers all come from these facts.
+
+
+def _latest_final_gw(conn: sqlite3.Connection) -> int | None:
+    """Most recent gameweek whose points/ranks are final in my_history
+    (bot/fpl_jobs._finalise_history marks these 'history_final')."""
+    row = conn.execute(
+        "SELECT MAX(gw) AS gw FROM notifications_sent WHERE kind = 'history_final'"
+    ).fetchone()
+    return row["gw"] if row else None
+
+
+def _ordinal(n: int) -> str:
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+async def build_pre_deadline_facts(conn: sqlite3.Connection, gw: int | None = None) -> dict:
+    """Why Ollie gained or lost ground in the mini-league in gameweek `gw`
+    (default: the latest final one), and what the league is doing that he
+    isn't — as plain numbers, for the T-24h analysis message and the
+    get_fpl_league_analysis tool."""
+    err = _not_configured()
+    if err:
+        return err
+    try:
+        gw = gw or _latest_final_gw(conn)
+        my_hist = get_my_history(conn, gw) if gw else None
+        if not gw or my_hist is None or my_hist.get("points") is None:
+            return {"error": "no finished gameweek with final points yet"}
+
+        data = await fpl_client.bootstrap()
+        elements = element_index(data)
+        names = {eid: el["web_name"] for eid, el in elements.items()}
+        live = await fpl_client.live(gw)
+        my_picks = [{"element_id": p["element_id"], "multiplier": p["multiplier"]} for p in get_my_picks(conn, gw)]
+
+        league_data = await fpl_client.league(config.FPL_LEAGUE_ID)
+        standings = sorted(league_data.get("standings", {}).get("results", []), key=lambda r: r["rank"])
+        me = next((r for r in standings if r["entry"] == config.FPL_TEAM_ID), None)
+        above = next((r for r in reversed(standings) if me and r["rank"] < me["rank"]), None)
+
+        rival_points: dict[int, int] = {}
+        rival_squads: dict[int, set[int]] = {}
+        for rival in get_active_rivals(conn):
+            hist = get_rival_history_row(conn, gw, rival["entry_id"])
+            if hist and hist.get("points") is not None:
+                rival_points[rival["entry_id"]] = hist["points"]
+            picks = get_rival_picks(conn, gw, rival["entry_id"])
+            if picks:
+                rival_squads[rival["entry_id"]] = {p["element_id"] for p in picks}
+        all_points = [my_hist["points"], *rival_points.values()]
+
+        # Gap decomposition vs the leader and vs whoever is directly above.
+        targets = []
+        if me and standings and standings[0]["entry"] != config.FPL_TEAM_ID:
+            targets.append(standings[0])
+            if above and above["entry"] != standings[0]["entry"]:
+                targets.append(above)
+        comparisons = []
+        for target in targets:
+            r_picks = get_rival_picks(conn, gw, target["entry"])
+            if target["entry"] not in rival_points or not r_picks:
+                continue
+            result = fpl_league.gw_review_decomposition(
+                my_points=my_hist["points"], my_picks=my_picks, my_live_points=live,
+                rival_name=target["player_name"], rival_points=rival_points[target["entry"]],
+                rival_picks=[{"element_id": p["element_id"], "multiplier": p["multiplier"]} for p in r_picks],
+                rival_live_points=live, names=names,
+            )
+            comparisons.append({
+                "name": target["player_name"],
+                "points": rival_points[target["entry"]],
+                "gap": result["vs_rival"]["gap"],
+                "causes": [{"cause": d["cause"], "delta": d["delta"], "detail": d["detail"]}
+                           for d in result["decomposition"]],
+            })
+
+        captain = next((p for p in my_picks if p["multiplier"] in (2, 3)), None)
+        starters = [p for p in my_picks if p["multiplier"] > 0]
+        best = max(starters, key=lambda p: live.get(p["element_id"], 0), default=None)
+        captain_facts = {
+            "name": names.get(captain["element_id"]) if captain else None,
+            "points": live.get(captain["element_id"], 0) if captain else 0,
+            "multiplier": captain["multiplier"] if captain else 0,
+            "best_starter": names.get(best["element_id"]) if best else None,
+            "best_starter_points": live.get(best["element_id"], 0) if best else 0,
+        }
+
+        transfers = [
+            {"in": names.get(t["element_in"], str(t["element_in"])), "in_points": live.get(t["element_in"], 0),
+             "out": names.get(t["element_out"], str(t["element_out"])), "out_points": live.get(t["element_out"], 0)}
+            for t in await fpl_client.transfers(config.FPL_TEAM_ID) if t.get("event") == gw
+        ]
+        hit_cost = my_hist.get("transfer_cost") or 0
+
+        my_squad = {p["element_id"] for p in my_picks}
+        min_owners = max(2, -(-len(rival_squads) // 2))  # owned by at least half the league
+        holes = fpl_league.league_template_holes(my_squad, rival_squads, min_owners=min_owners) if rival_squads else set()
+        owners = collections.Counter(e for squad in rival_squads.values() for e in squad)
+        template_holes = [
+            {"name": names.get(eid, str(eid)), "rivals_owning": owners[eid], "rivals": len(rival_squads)}
+            for eid in sorted(holes, key=lambda e: (-owners[e], names.get(e, "")))
+        ]
+
+        flagged = [
+            {"name": elements[eid]["web_name"], "flag": status_flag(elements[eid])}
+            for eid in sorted(my_squad) if eid in elements and status_flag(elements[eid])
+        ]
+
+        review = await get_fpl_gw_review(conn, gw)
+        tgw = target_gameweek(conn)
+        return {
+            "gw": gw,
+            "next_gw": tgw["gw"] if tgw else None,
+            "my_points": my_hist["points"],
+            "league_average": round(sum(all_points) / len(all_points), 1),
+            "league_rank": me["rank"] if me else None,
+            "league_rank_before": me.get("last_rank") if me else None,
+            "league_size": len(standings),
+            "total_gap_to_leader": (me["total"] - standings[0]["total"]) if me and standings else None,
+            "total_gap_to_above": (me["total"] - above["total"]) if me and above else None,
+            "comparisons": comparisons,
+            "captain": captain_facts,
+            "bench_points": my_hist.get("points_on_bench") or 0,
+            "transfers": transfers,
+            "transfer_net": sum(t["in_points"] - t["out_points"] for t in transfers) - hit_cost,
+            "hit_cost": hit_cost,
+            "rival_moves": review.get("rival_transfers", []) if "error" not in review else [],
+            "widely_bought": review.get("widely_bought", []) if "error" not in review else [],
+            "template_holes": template_holes,
+            "flagged": flagged,
+        }
+    except Exception as exc:
+        logger.warning("build_pre_deadline_facts failed: %s", exc)
+        return {"error": str(exc)}
+
+
+def format_pre_deadline_facts(facts: dict) -> list[str]:
+    """The deterministic half of the analysis message — always sent, whether
+    or not an AI summary is added on top."""
+    lines = [f"League check — GW{facts['gw']}"]
+    rank = facts.get("league_rank")
+    if rank:
+        before = facts.get("league_rank_before")
+        move = ""
+        if before and before != rank:
+            move = f", {'up' if rank < before else 'down'} {abs(before - rank)}"
+        elif before:
+            move = ", no change"
+        lines.append(
+            f"{facts['my_points']} pts vs a league average of {facts['league_average']:g} — "
+            f"{_ordinal(rank)} of {facts['league_size']}{move}."
+        )
+    gaps = []
+    if facts.get("total_gap_to_above") is not None:
+        gaps.append(f"{facts['total_gap_to_above']:+d} to the place above")
+    if facts.get("total_gap_to_leader") is not None:
+        gaps.append(f"{facts['total_gap_to_leader']:+d} to the leader")
+    if gaps:
+        lines.append("Overall: " + ", ".join(gaps) + ".")
+
+    for c in facts.get("comparisons", []):
+        lines += ["", f"vs {c['name']} ({c['points']}, {c['gap']:+d}):"]
+        for cause in c["causes"]:
+            lines.append(f"- {cause['cause'].capitalize()} ({cause['delta']:+d}): {cause['detail']}")
+
+    cap = facts.get("captain") or {}
+    lines.append("")
+    if cap.get("name"):
+        line = f"Captain: {cap['name']} {cap['points']}x{cap['multiplier']}"
+        if cap.get("best_starter") and cap["best_starter"] != cap["name"]:
+            line += f" (best starter: {cap['best_starter']} {cap['best_starter_points']})"
+        lines.append(line + ".")
+    lines.append(f"Bench: {facts.get('bench_points', 0)} pts left on it.")
+    if facts.get("transfers"):
+        moves = "; ".join(f"{t['in']} in ({t['in_points']}), {t['out']} out ({t['out_points']})"
+                          for t in facts["transfers"])
+        hit = f" after a -{facts['hit_cost']} hit" if facts.get("hit_cost") else ""
+        lines.append(f"Transfers: {moves} — net {facts['transfer_net']:+d}{hit}.")
+
+    if facts.get("template_holes"):
+        holes = ", ".join(f"{h['name']} ({h['rivals_owning']}/{h['rivals']} rivals)" for h in facts["template_holes"][:4])
+        lines.append(f"League template you don't own: {holes}.")
+    for w in facts.get("widely_bought", []):
+        lines.append(f"{w['rival_count']} rivals bought {w['player']} last week.")
+    if facts.get("flagged"):
+        lines.append("Flagged in your squad: " + ", ".join(f"{f['name']} ({f['flag']})" for f in facts["flagged"]) + ".")
+    return lines
+
+
 _INTL_BREAK_END = "2026-10-06"  # FPL-CONTEXT.md §1: merged 2026/27 break runs 21 Sept-6 Oct
 _WILDCARD1_RANGE = (5, 9)
 _FREEHIT1_FALLBACK_GW = 17  # FPL-CONTEXT.md §2.7: spend it rather than lose it if nothing's appeared by ~GW17
@@ -1101,6 +1297,7 @@ def _captain_section(
     result: SolveResult, candidate_by_id: dict[int, Candidate], elements: dict[int, dict],
     teams: dict[int, dict], fixtures: list[dict], gw: int,
     eo_by_element: dict[int, float] | None = None, mode: str | None = None,
+    gw_xp: dict[int, float] | None = None,
 ) -> dict:
     """§ output contract upgrade, PHASE3-BRIEF.md Step 2: captaincy cost 20
     points in GW2 alone (owned both Fernandes and Haaland, captained the
@@ -1116,29 +1313,38 @@ def _captain_section(
     higher-EO option — FPL-CONTEXT.md §2.2's asymmetric-risk argument for
     owning what the field owns at the top of the squad); chase differentiates
     (prefer the lower-EO option). Without both arguments this falls back to
-    the solver's own top-xP pick, unchanged."""
-    starters_by_xp = sorted(
-        (eid for eid in result.xi if eid != result.captain),
-        key=lambda eid: -candidate_by_id[eid].horizon_xp,
-    )
+    the solver's own top-xP pick, unchanged.
+
+    gw_xp is each player's xP for *this* gameweek (undiscounted). Captaincy
+    only pays out this week, so the pick, the runner-up, the shown xP and
+    the clear/close/coin-flip margins (per-GW thresholds) all use it, not the
+    5-GW discounted horizon the solver plans transfers on — that showed
+    Haaland at "22.2 xP" and could captain a player for fixtures weeks away
+    (audit, Oct 2026). Without gw_xp it falls back to horizon_xp.
+    """
+    def _xp(eid: int) -> float:
+        return gw_xp.get(eid, 0.0) if gw_xp is not None else candidate_by_id[eid].horizon_xp
+
+    top_id = max(result.xi, key=lambda eid: (_xp(eid), eid == result.captain))
+    starters_by_xp = sorted((eid for eid in result.xi if eid != top_id), key=lambda eid: -_xp(eid))
 
     def _candidate_row(eid: int) -> dict:
         el = elements[eid]
         return {
             "element": eid,
             "name": el["web_name"],
-            "xp": round(candidate_by_id[eid].horizon_xp, 1),
+            "xp": round(_xp(eid), 1),
             "fixture": _fixture_display(fixtures, el["team"], gw, teams),
             "difficulty": _fixture_difficulty(fixtures, el["team"], gw),
         }
 
-    top_xp = candidate_by_id[result.captain].horizon_xp
+    top_xp = _xp(top_id)
     runner_up_id = starters_by_xp[0] if starters_by_xp else None
-    runner_up_xp = candidate_by_id[runner_up_id].horizon_xp if runner_up_id is not None else top_xp
+    runner_up_xp = _xp(runner_up_id) if runner_up_id is not None else top_xp
     gap = top_xp - runner_up_xp
     margin = "clear" if gap >= 2.0 else ("coin-flip" if gap < 0.5 else "close")
 
-    captain_id = result.captain
+    captain_id = top_id
     tiebreak_note = ""
     if margin != "clear" and eo_by_element and mode and runner_up_id is not None:
         prefer_higher = mode != "chase"
@@ -1154,14 +1360,14 @@ def _captain_section(
             )
             captain_id, runner_up_id = runner_up_id, captain_id
 
-    pick_xp = candidate_by_id[captain_id].horizon_xp
+    pick_xp = _xp(captain_id)
     alternatives = [_candidate_row(eid) for eid in ([runner_up_id] if runner_up_id is not None else []) + starters_by_xp[1:2]]
 
     # Vice is chosen independently of the captain runner-up: prefer the best
     # remaining starter whose fixture falls on a different day, so a captain
     # benched at 14:00 Saturday is still covered by someone playing elsewhen.
-    vice_pool = [eid for eid in ([result.captain] + starters_by_xp) if eid != captain_id]
-    vice_pool.sort(key=lambda eid: -candidate_by_id[eid].horizon_xp)
+    vice_pool = [eid for eid in ([top_id] + starters_by_xp) if eid != captain_id]
+    vice_pool.sort(key=lambda eid: -_xp(eid))
     captain_date = _fixture_date_key(fixtures, elements[captain_id]["team"], gw)
     vice = None
     if captain_date is not None:
@@ -1174,7 +1380,8 @@ def _captain_section(
 
     pick_el = elements[captain_id]
     rationale = (
-        f"{pick_el['web_name']} projects the highest horizon xP among starters ({pick_xp:.1f}), "
+        f"{pick_el['web_name']} projects the highest xP among starters "
+        f"{'this gameweek' if gw_xp is not None else 'over the horizon'} ({pick_xp:.1f}), "
         f"{_fixture_display(fixtures, pick_el['team'], gw, teams)} "
         f"(difficulty {_fixture_difficulty(fixtures, pick_el['team'], gw)})."
         f"{tiebreak_note}"
@@ -1466,16 +1673,14 @@ async def get_fpl_recommendation(
 
         recommended_result = results_by_id[recommended_id]
         candidate_by_id = {c.element_id: c for c in candidates}
-        starters_by_xp = sorted(
-            (e for e in recommended_result.xi if e != recommended_result.captain),
-            key=lambda e: -candidate_by_id[e].horizon_xp,
-        )
-        captain_candidate_ids = {recommended_result.captain} | set(starters_by_xp[:2])
+        gw_xp = {eid: by_gw.get(gw, 0.0) for eid, by_gw in raw_predictions.items()}
+        starters_by_xp = sorted(recommended_result.xi, key=lambda e: -gw_xp.get(e, 0.0))
+        captain_candidate_ids = set(starters_by_xp[:3])
         eo_by_element = _captain_eo_context(conn, gw, captain_candidate_ids)
         mode = await _eo_mode_for_ollie(gw) if eo_by_element else None
         captain_section = _captain_section(
             recommended_result, candidate_by_id, elements, teams, fixtures, gw,
-            eo_by_element=eo_by_element, mode=mode,
+            eo_by_element=eo_by_element, mode=mode, gw_xp=gw_xp,
         )
         lineup_section = _lineup_section(
             recommended_result, current_starting, elements, teams, fixtures, gw, candidate_by_id,
@@ -1571,6 +1776,32 @@ TOOL_SCHEMAS: list[dict] = [
                     "gw": {"type": "integer", "description": "The gameweek to review, e.g. 2."},
                 },
                 "required": ["gw"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_fpl_league_analysis",
+            "description": (
+                "Get the league check Robin sends before each deadline: Ollie's last final "
+                "gameweek vs his mini-league — points vs the league average, rank movement, the "
+                "gap to the leader and to the place above decomposed into captain/bench/squad "
+                "causes, his captain and bench, his transfers' net points, players most of the "
+                "league owns that he doesn't, and flagged players. Use for 'why did I gain/lose "
+                "ground', 'how did I do vs the league', 'what should I change'. Only numbers in "
+                "this result may be quoted — paraphrase each cause's `detail`, never recompute. "
+                "Returns an error until a gameweek's points are final; relay it plainly."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "gw": {
+                        "type": ["integer", "null"],
+                        "description": "Gameweek to analyse. Omit for the latest final one.",
+                    },
+                },
+                "required": [],
             },
         },
     },

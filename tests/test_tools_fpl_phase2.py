@@ -472,6 +472,26 @@ def test_captain_section_margin_coin_flip_under_half():
     assert cap["margin"] == "coin-flip"
 
 
+def test_captain_is_picked_on_this_gameweeks_xp_not_the_five_week_total():
+    # Audit (Oct 2026): captaincy used the discounted 5-GW horizon xP (Haaland
+    # showed "22.2 xP"), so a player with a strong run of later fixtures could
+    # be captained over one with the better fixture *this* week, and the
+    # per-GW margin thresholds (2.0 / 0.5) were applied to 5-GW totals.
+    elements = {1: {"team": 1, "web_name": "LongRun"}, 2: {"team": 2, "web_name": "ThisWeek"}}
+    teams = {1: {"short_name": "T1"}, 2: {"short_name": "T2"}}
+    candidate_by_id = {1: _cand(1, 1, "MID", 30.0), 2: _cand(2, 2, "MID", 24.0)}  # horizon totals
+    gw_xp = {1: 5.0, 2: 7.5}  # this gameweek only
+    result = SolveResult(squad={1, 2}, xi={1, 2}, captain=1, vice=2)  # solver chose on horizon
+
+    cap = fpl_tools._captain_section(result, candidate_by_id, elements, teams, [], gw=1, gw_xp=gw_xp)
+
+    assert cap["pick"] == 2
+    assert cap["xp"] == 7.5
+    assert cap["margin"] == "clear"  # 2.5 apart this week
+    assert cap["alternatives"][0]["xp"] == 5.0
+    assert "this gameweek" in cap["rationale"]
+
+
 def test_captain_section_vice_prefers_a_different_day_fixture():
     """A lower-xP starter on a different day beats a higher-xP starter sharing
     the captain's day — PHASE3-BRIEF.md Step 2 rule 2: covers a late benching."""

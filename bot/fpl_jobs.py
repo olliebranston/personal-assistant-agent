@@ -4,19 +4,24 @@ A single 5-minute tick checks the gameweeks table for what's due, rather
 than one job-queue timer per notification kind — simpler and more robust
 against missed windows (deploys, restarts) than exact-time timers, per the
 brief's own stated preference. Every message here is deterministic string
-formatting, no LLM call — same pattern as every job in bot/scheduler.py
-(TOOL_CALLING_DESIGN.md §4.4, Option A).
+formatting (TOOL_CALLING_DESIGN.md §4.4, Option A) with one exception: the
+pre-deadline league analysis (Oct 2026) may add a 3-4 line AI summary on
+top of its deterministic facts, and only if every number in it comes from
+those facts — otherwise the facts go out alone (_pre_deadline_summary).
 """
 
 from __future__ import annotations
 
 import datetime
+import json
 import logging
+import re
 
 from telegram.ext import Application
 
 import config
 from services import fpl_client
+from services.openrouter import complete
 from services.fpl_optimiser import verify_squad_value
 from storage.db import get_connection
 from storage.models import (
@@ -38,7 +43,9 @@ from storage.models import (
     was_notification_sent,
 )
 from tools.fpl import (
+    build_pre_deadline_facts,
     element_index,
+    format_pre_deadline_facts,
     format_countdown,
     format_deadline_london,
     get_fpl_calendar,
@@ -108,10 +115,69 @@ def _lineup_table(xi: list[dict], elements: dict) -> str:
 # ── Message builders ─────────────────────────────────────────────────────────
 
 
+_SUMMARY_SYSTEM = """\
+You are Robin, Ollie's assistant, writing the short take that sits above his \
+weekly FPL league check. You are given the facts as JSON: his last gameweek \
+vs his mini-league (gap causes against rivals, captain, bench, transfers, \
+players most of the league owns that he doesn't, flagged players).
+
+Write 3-4 short plain sentences: first why he gained or lost ground (biggest \
+cause first), then what — if anything — to change for the next gameweek. \
+Use ONLY numbers that appear in the facts; never estimate, add up or invent \
+one. Don't list everything, don't repeat the facts verbatim, no preamble, no \
+headings, no emojis. If nothing needs changing, say so.\
+"""
+
+_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+
+
+async def _pre_deadline_summary(facts: dict) -> str | None:
+    """A 3-4 line AI take on the facts — or None, in which case the facts go
+    out alone. Rejected if it contains any number not present in the facts:
+    a summary that misstates a figure is worse than no summary."""
+    try:
+        text = (await complete(
+            messages=[{"role": "user", "content": json.dumps(facts)}],
+            system=_SUMMARY_SYSTEM,
+        ) or "").strip()
+    except Exception as exc:
+        logger.warning("FPL pre-deadline summary: AI call failed, sending facts only: %s", exc)
+        return None
+    if not text:
+        return None
+    allowed = {float(n) for n in _NUMBER_RE.findall(json.dumps(facts))}
+    unsupported = [n for n in _NUMBER_RE.findall(text) if float(n) not in allowed]
+    if unsupported:
+        logger.warning("FPL pre-deadline summary dropped — numbers not in the facts: %s", unsupported)
+        return None
+    return text
+
+
+async def _send_pre_deadline_analysis(context, conn) -> None:
+    """W6 (Oct 2026): why Ollie gained/lost ground in the league last
+    gameweek and what to change — sent as its own message just before the
+    T-24h recommendation (kept separate so the two can't together run past
+    Telegram's message length limit). Silent if no gameweek is final yet."""
+    try:
+        facts = await build_pre_deadline_facts(conn)
+        if "error" in facts:
+            logger.info("FPL pre-deadline analysis skipped: %s", facts["error"])
+            return
+        lines = format_pre_deadline_facts(facts)
+        summary = await _pre_deadline_summary(facts)
+        if summary:
+            lines += ["", f"Robin's take: {summary}"]
+        await send_formatted(context.bot, _UID, "\n".join(lines))
+    except Exception as exc:
+        logger.warning("FPL pre-deadline analysis failed: %s", exc)
+
+
 async def _send_t24(context, conn) -> None:
     """PHASE2-BRIEF.md §7's upgraded T-24h message: recommendation first, status
     dump only as a fallback when there's no squad yet or the recommendation
-    fails validation — adherence still matters even with nothing to recommend."""
+    fails validation — adherence still matters even with nothing to recommend.
+    Preceded by the league analysis message (_send_pre_deadline_analysis)."""
+    await _send_pre_deadline_analysis(context, conn)
     rec = await get_fpl_recommendation(conn)
     if "error" in rec:
         logger.info("FPL T-24h: no recommendation available (%s) — falling back to status", rec["error"])
