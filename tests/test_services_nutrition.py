@@ -155,6 +155,35 @@ def test_fallback_lookup_does_not_match_inside_other_words():
     assert nutrition_svc._fallback_lookup("boiled eggs") == (13.0, 143.0)
 
 
+def test_dried_lentils_are_not_priced_as_cooked():
+    # VM top foods (22 Oct 2026): "dried lentils" logged 7 times, all matched
+    # the cooked-lentil rule (9g protein/100g) — ~2.6x under-counted.
+    assert nutrition_svc._pre_lookup("dried lentils") == (24.6, 352.0)  # USDA SR 172420
+    assert nutrition_svc._pre_lookup("red lentils, dry") == (24.6, 352.0)
+    assert nutrition_svc._pre_lookup("lentils") == (9.0, 116.0)  # cooked, unchanged
+
+
+def test_fallback_prefers_the_most_specific_entry():
+    # "milk" used to win for "oat milk" and "coconut milk" (first match).
+    assert nutrition_svc._fallback_lookup("oat milk") == (0.8, 48.0)
+    assert nutrition_svc._fallback_lookup("coconut milk") == (2.0, 197.0)
+    assert nutrition_svc._fallback_lookup("spring onions") == (1.8, 32.0)
+    assert nutrition_svc._fallback_lookup("red onion") == (1.1, 40.0)
+    assert nutrition_svc._fallback_lookup("semi-skimmed milk") == (3.2, 61.0)
+
+
+@pytest.mark.parametrize("food", [
+    # Ollie's most-logged foods with no reliable fallback before, plus every
+    # food that logged as 0 kcal ("estimated") during the Oct USDA outages.
+    "oat milk", "frozen fruit", "butter", "toast", "tomatoes", "onion", "ginger", "garlic",
+    "chilli", "coconut milk", "chickpeas", "vegetable oil", "mayonnaise", "courgette", "tea",
+    "soy sauce", "noodles", "mushrooms", "carrots", "spring onion", "maple syrup",
+    "raspberries", "blueberries", "sweetcorn", "red onion", "sausages", "spices",
+])
+def test_regular_foods_survive_a_usda_outage(food):
+    assert nutrition_svc._fallback_lookup(food) is not None
+
+
 def test_whey_fallback_is_per_100g_not_per_scoop():
     # The table had whey at 25g protein / 120 kcal — a per-scoop label value,
     # not per 100g — so any whey logged via the fallback was under-counted by

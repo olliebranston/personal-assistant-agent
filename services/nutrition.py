@@ -36,7 +36,7 @@ _FALLBACK: dict[str, tuple[float, float]] = {
     "porridge":         (13.0, 375.0),
     "dates":            ( 2.5, 282.0),
     "chicken breast":   (31.0, 165.0),
-    "chicken":          (27.0, 165.0),
+    "chicken":          (31.0, 165.0),  # breast values: Ollie's "chicken" is breast (food log, Oct 2026)
     "salmon":           (25.0, 208.0),
     "eggs":             (13.0, 143.0),
     "egg":              (13.0, 143.0),
@@ -80,6 +80,42 @@ _FALLBACK: dict[str, tuple[float, float]] = {
     "tempeh":           (19.0, 193.0),
     "mackerel":         (19.0, 205.0),
     "quinoa":           ( 4.4, 120.0),
+    # Ollie's regular foods (VM food log, Oct 2026), so a USDA outage doesn't
+    # log them as 0 kcal — USDA FoodData Central values, FDC id in brackets
+    # (SR Legacy unless marked Foundation/FNDDS), read 22 Oct 2026.
+    "oat milk":         ( 0.8,  48.0),  # [2257046 Foundation] unsweetened, refrigerated
+    "coconut milk":     ( 2.0, 197.0),  # [170173] canned
+    "frozen fruit":     ( 0.8,  52.0),  # [2709272 FNDDS] berries, frozen
+    "frozen berries":   ( 0.8,  52.0),  # [2709272 FNDDS]
+    "mixed berries":    ( 0.8,  52.0),  # [2709272 FNDDS]
+    "raspberry":        ( 1.2,  52.0),  # [167755]
+    "raspberries":      ( 1.2,  52.0),  # [167755]
+    "blueberry":        ( 0.7,  57.0),  # [171711]
+    "blueberries":      ( 0.7,  57.0),  # [171711]
+    "butter":           ( 0.8, 717.0),  # [173410] salted
+    "toast":            ( 9.0, 290.0),  # [174925] white bread, toasted
+    "tomato":           ( 0.9,  18.0),  # [170457] red, raw
+    "onion":            ( 1.1,  40.0),  # [170000] raw
+    "spring onion":     ( 1.8,  32.0),  # [170005] raw
+    "ginger":           ( 1.8,  80.0),  # [169231] root, raw
+    "garlic":           ( 6.4, 149.0),  # [169230] raw
+    "chilli":           ( 1.9,  40.0),  # [170106] hot chili, red, raw
+    "chili":            ( 1.9,  40.0),  # [170106]
+    "chickpea":         ( 7.0, 139.0),  # [173800] canned, drained (tinned assumed)
+    "vegetable oil":    ( 0.0, 884.0),  # [172370]
+    "mayonnaise":       ( 1.0, 680.0),  # [171009] regular
+    "courgette":        ( 1.2,  17.0),  # [169291] zucchini, raw
+    "zucchini":         ( 1.2,  17.0),  # [169291]
+    "tea":              ( 0.0,   1.0),  # [174120] brewed
+    "soy sauce":        ( 8.1,  53.0),  # [174277] shoyu
+    "noodles":          ( 4.5, 138.0),  # [169732] egg noodles, cooked (cooked weight assumed)
+    "mushroom":         ( 3.1,  22.0),  # [169251] white, raw
+    "carrot":           ( 0.9,  41.0),  # [170393] raw
+    "maple syrup":      ( 0.0, 260.0),  # [169661]
+    "sweetcorn":        ( 2.3,  67.0),  # [169214] canned, drained
+    "sweet corn":       ( 2.3,  67.0),  # [169214]
+    "sausage":          (18.5, 325.0),  # [2706191 FNDDS] pork sausage
+    "spices":           (14.3, 325.0),  # [170924] curry powder — a stand-in for mixed spices
 }
 
 
@@ -106,6 +142,10 @@ def _pre_lookup(query: str) -> tuple[float, float] | None:
     if has("rice") and "brown" not in q and "fried" not in q and "wild" not in q:
         return (2.7, 130.0)
     if has("lentil"):
+        # Dried/raw lentils weigh in at ~2.7x cooked — Ollie logs "dried
+        # lentils", which this rule used to price as cooked (Oct 2026).
+        if any(w in q for w in ("dried", "dry", "raw")):
+            return (24.6, 352.0)  # USDA SR 172420 lentils, raw
         return (9.0, 116.0)
     return None
 
@@ -135,10 +175,14 @@ def _is_plausible(protein_per_100g: float, kcal_per_100g: float) -> bool:
 def _fallback_lookup(query: str) -> tuple[float, float] | None:
     """Check the hardcoded fallback table. Returns (protein_per_100g, kcal_per_100g) or None."""
     q = query.lower().strip()
+    # Whole-word match (plural allowed) — a plain substring gave "eggplant"
+    # egg macros and "licorice" rice macros. The longest (most specific)
+    # matching key wins, so "oat milk" isn't priced as "milk".
+    matches = [key for key in _FALLBACK if re.search(r"\b" + re.escape(key) + r"(?:e?s)?\b", q)]
+    if matches:
+        return _FALLBACK[max(matches, key=len)]
     for key, vals in _FALLBACK.items():
-        # Whole-word match (plural allowed) — a plain substring gave
-        # "eggplant" egg macros and "licorice" rice macros.
-        if re.search(r"\b" + re.escape(key) + r"(?:e?s)?\b", q) or q in key:
+        if q in key:  # a partial query, e.g. "chick" -> "chicken breast"
             return vals
     return None
 
