@@ -192,6 +192,28 @@ async def test_format_facts_reads_as_a_short_report(_wired):
     assert "Saka" in text
 
 
+# ── "Last week" means the latest *finished* gameweek ────────────────────────
+# Telegram smoke test, 22 Oct 2026: "why did I lose ground in the league last
+# week?" got "points for GW8 still haven't synced" — the model took the
+# upcoming GW8 (deadline next day) as "last week" and asked for it.
+
+
+@pytest.mark.asyncio
+async def test_analysis_for_an_unfinished_gameweek_falls_back_to_the_latest_final_one(_wired):
+    facts = await fpl_tools.build_pre_deadline_facts(_wired, gw=8)
+
+    assert facts["gw"] == 7
+    assert "GW8" in facts["note"] and "GW7" in facts["note"]
+
+
+@pytest.mark.asyncio
+async def test_gw_review_for_an_unfinished_gameweek_points_to_the_latest_final_one(_wired):
+    result = await fpl_tools.get_fpl_gw_review(_wired, gw=8)
+
+    assert result["latest_final_gw"] == 7
+    assert "GW7" in result["error"]
+
+
 # ── AI summary guard ─────────────────────────────────────────────────────────
 
 

@@ -504,6 +504,18 @@ async def get_fpl_gw_review(conn: sqlite3.Connection, gw: int) -> dict:
     if err:
         return err
     try:
+        # The model has taken "last week" to mean the upcoming gameweek
+        # (Telegram, 22 Oct 2026) — name the latest finished one so it can
+        # answer with that instead of just reporting "not synced".
+        latest = _latest_final_gw(conn)
+        if latest is not None and gw > latest:
+            return {
+                "error": (
+                    f"GW{gw} hasn't finished yet — the latest finished gameweek is GW{latest}, "
+                    "which is what 'last week' means. Use that."
+                ),
+                "latest_final_gw": latest,
+            }
         my_hist = get_my_history(conn, gw)
         if my_hist is None or my_hist.get("points") is None:
             return {"error": f"GW{gw} points not synced yet"}
@@ -601,7 +613,14 @@ async def build_pre_deadline_facts(conn: sqlite3.Connection, gw: int | None = No
     if err:
         return err
     try:
-        gw = gw or _latest_final_gw(conn)
+        latest = _latest_final_gw(conn)
+        note = None
+        if gw and latest is not None and gw > latest:
+            # "Last week" read as the upcoming gameweek — answer for the
+            # latest finished one and say so, rather than erroring.
+            note = f"GW{gw} hasn't finished yet, so this is GW{latest}, the latest finished gameweek."
+            gw = latest
+        gw = gw or latest
         my_hist = get_my_history(conn, gw) if gw else None
         if not gw or my_hist is None or my_hist.get("points") is None:
             return {"error": "no finished gameweek with final points yet"}
@@ -707,6 +726,7 @@ async def build_pre_deadline_facts(conn: sqlite3.Connection, gw: int | None = No
             "widely_bought": review.get("widely_bought", []) if "error" not in review else [],
             "template_holes": template_holes,
             "flagged": flagged,
+            **({"note": note} if note else {}),
         }
     except Exception as exc:
         logger.warning("build_pre_deadline_facts failed: %s", exc)
@@ -1768,7 +1788,10 @@ TOOL_SCHEMAS: list[dict] = [
                 "and sold that gameweek and which players 3+ rivals bought at once. Only "
                 "available once that gameweek's points and rival picks have synced (post "
                 "lockdown) — returns an error before then, relay it plainly. Use for 'why did I "
-                "lose to X this week', 'what happened in the league', or 'what did people buy'."
+                "lose to X this week', 'what happened in the league', or 'what did people buy'. "
+                "gw must be a FINISHED gameweek — for general 'last week' / 'why did I lose "
+                "ground' questions prefer get_fpl_league_analysis with no gw. If this returns "
+                "latest_final_gw, retry with that gameweek."
             ),
             "parameters": {
                 "type": "object",

@@ -240,9 +240,13 @@ chips-used — see below). get_fpl_gw_review -> 'why did I lose to X this \
 week' or 'what happened in the league' (pass the gw); needs that \
 gameweek's points and rival picks already synced, so relay its error \
 plainly rather than guessing if it's too soon. get_fpl_league_analysis -> \
-'why did I gain/lose ground', 'how did I do vs the league', 'what should I \
-change' (latest final gameweek vs the whole mini-league; quote only its \
-numbers). get_fpl_chips \
+'why did I gain/lose ground', 'how did I do last week', 'how did I do vs the \
+league', 'what should I change' — call it WITHOUT gw: it picks the latest \
+finished gameweek itself (quote only its numbers; if it has a `note`, \
+mention it). "Last week"/"last gameweek" always means the latest FINISHED \
+gameweek, never the upcoming one whose deadline hasn't passed — so never \
+pass the upcoming gameweek's number to it or to get_fpl_gw_review. \
+get_fpl_chips \
 -> '/fpl chips' or 'when should I use my chips' (it already includes a \
 chip-timing signal — don't also call get_fpl_calendar for that question). \
 get_fpl_calendar -> 'any blanks coming up' or double-gameweek questions. \
